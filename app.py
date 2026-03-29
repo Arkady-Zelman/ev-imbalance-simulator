@@ -113,7 +113,7 @@ with st.sidebar:
     sizing_method = st.radio(
         "Position Sizing Method",
         ["Percentile", "Kelly Criterion"],
-        index=0,
+        index=1,
         horizontal=True,
         help="Percentile = arbitrary quantile of availability. "
              "Kelly = maximises long-run geometric growth given DA/SIP payoff asymmetry.",
@@ -309,7 +309,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Market Data (ELEXON)")
     today = dt.date.today()
-    default_from = today - dt.timedelta(days=30)
+    default_from = today - dt.timedelta(days=90)
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         date_from = st.date_input("From", value=default_from)

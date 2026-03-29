@@ -50,6 +50,12 @@ def render(has_results: bool) -> None:
         st.warning("No MIP data available.")
         return
 
+    _render_rolling_backtest_body()
+
+
+@st.fragment
+def _render_rolling_backtest_body() -> None:
+    """Isolated as a fragment so widget changes don't reset the active tab."""
     sip_df = st.session_state[SIP_DF]
     mip_df = st.session_state[MIP_DF]
 
