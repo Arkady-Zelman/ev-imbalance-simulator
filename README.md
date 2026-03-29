@@ -1,8 +1,8 @@
 # EV Flexibility Portfolio Imbalance Exposure Simulator
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ev-imbalance-simulator.streamlit.app)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ev-imbalance-simulator-g4hnyfdnfrafcfffhswnbb.streamlit.app/)
 
-**[Live Dashboard](https://ev-imbalance-simulator.streamlit.app)**
+**[Live Dashboard](https://ev-imbalance-simulator-g4hnyfdnfrafcfffhswnbb.streamlit.app/)**
 
 A production-grade Streamlit dashboard for modelling, simulating, and
 backtesting the imbalance exposure of an EV smart-charging flexibility
