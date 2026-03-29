@@ -4,7 +4,7 @@
 
 **[Live Dashboard](https://ev-imbalance-simulator-g4hnyfdnfrafcfffhswnbb.streamlit.app/)**
 
-A production-grade Streamlit dashboard for modelling, simulating, and
+A Streamlit dashboard for modelling, simulating, and
 backtesting the imbalance exposure of an EV smart-charging flexibility
 portfolio in the GB electricity market.
 
