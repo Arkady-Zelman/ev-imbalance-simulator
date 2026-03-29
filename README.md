@@ -8,7 +8,7 @@ A Streamlit dashboard for modelling, simulating, and
 backtesting the imbalance exposure of an EV smart-charging flexibility
 portfolio in the GB electricity market.
 
-This project was inspired by [Ohme](https://ohme.io)'s work aggregating
+I wanted to explore aggregating
 residential EV chargers into virtual power plants and trading their combined
 flexibility on wholesale and balancing markets. I wanted to build a hands-on
 tool that captures the core economics of this problem — the asymmetric risk
