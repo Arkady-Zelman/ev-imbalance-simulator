@@ -28,7 +28,7 @@ from src.models.rolling_backtest import (
     build_error_matrix,
     run_rolling_backtest,
 )
-from src.session_keys import MIP_DF, SIP_DF
+from src.session_keys import DEMAND_DF, MIP_DF, SIP_DF
 
 
 def render(has_results: bool) -> None:
@@ -58,24 +58,46 @@ def _render_rolling_backtest_body() -> None:
     """Isolated as a fragment so widget changes don't reset the active tab."""
     sip_df = st.session_state[SIP_DF]
     mip_df = st.session_state[MIP_DF]
+    demand_df = st.session_state.get(DEMAND_DF)
+
+    has_demand = demand_df is not None and not demand_df.empty
 
     # ── Configuration ─────────────────────────────────────────────────
     st.subheader("Configuration")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
+        target_label = st.radio(
+            "Forecast target",
+            ["SIP (Price)", "Demand"] if has_demand else ["SIP (Price)"],
+            horizontal=True,
+            key="rb_target",
+        )
+        target_key = "demand" if target_label == "Demand" else "sip"
+    with col2:
+        method_options = ["TOD Mean", "EWMA", "XGBoost"]
         method = st.radio(
             "Forecast method",
-            ["TOD Mean", "EWMA"],
+            method_options,
             horizontal=True,
             key="rb_method",
         )
-        method_key = "tod_mean" if method == "TOD Mean" else "ewma"
-    with col2:
+        method_key = {"TOD Mean": "tod_mean", "EWMA": "ewma", "XGBoost": "xgb"}[method]
+    with col3:
         ewma_alpha = st.slider(
             "EWMA α", 0.01, 0.30, 0.05, 0.01,
             key="rb_ewma_alpha",
             help="Only used when EWMA is selected.",
         )
+
+    if method_key == "xgb":
+        st.info(
+            "XGBoost trains a fresh model per (lookback, horizon) at each origin. "
+            "This is significantly slower than the naive methods — expect several minutes."
+        )
+
+    if target_key == "demand" and not has_demand:
+        st.warning("No demand data available. Run a simulation with demand data first.")
+        return
 
     run_btn = st.button(
         "🔬 Run Rolling Backtest",
@@ -85,8 +107,10 @@ def _render_rolling_backtest_body() -> None:
     )
 
     if run_btn:
-        with st.spinner("Aligning SIP and MIP series…"):
-            sip_series, mip_series = build_aligned_series(sip_df, mip_df)
+        with st.spinner("Aligning SIP, MIP and Demand series…"):
+            sip_series, mip_series, demand_series = build_aligned_series(
+                sip_df, mip_df, demand_df=demand_df,
+            )
 
         n_days = len(sip_series) // 48
         if n_days < 45:
@@ -96,27 +120,41 @@ def _render_rolling_backtest_body() -> None:
             )
             return
 
+        target_desc = "Demand" if target_key == "demand" else "SIP"
         st.caption(f"Data: {len(sip_series):,} SPs ({n_days} days) — "
-                   f"{sip_series.index[0]} → {sip_series.index[-1]}")
+                   f"{sip_series.index[0]} → {sip_series.index[-1]}  |  "
+                   f"Target: **{target_desc}**  |  Method: **{method}**")
 
-        with st.spinner("Running rolling backtest (1/15/30-day lookbacks × 1-14 day horizons)…"):
+        spinner_msg = (
+            f"Running rolling backtest ({method}, {target_desc}, "
+            f"1/15/30-day lookbacks × 1-14 day horizons)…"
+        )
+        with st.spinner(spinner_msg):
             errors, crossovers = run_rolling_backtest(
                 sip_series, mip_series,
                 method=method_key,
                 ewma_alpha=ewma_alpha,
+                target=target_key,
+                demand_series=demand_series,
             )
 
-        st.session_state["_rb_errors"] = errors
-        st.session_state["_rb_crossovers"] = crossovers
+        rb_key_prefix = f"_rb_{target_key}_{method_key}"
+        st.session_state[f"{rb_key_prefix}_errors"] = errors
+        st.session_state[f"{rb_key_prefix}_crossovers"] = crossovers
+        st.session_state["_rb_last_key"] = rb_key_prefix
         st.success(f"Rolling backtest complete — {len(errors)} configurations evaluated.")
 
     # ── Results ───────────────────────────────────────────────────────
-    if "_rb_errors" not in st.session_state:
+    rb_key_prefix = st.session_state.get("_rb_last_key")
+    if rb_key_prefix is None or f"{rb_key_prefix}_errors" not in st.session_state:
         st.info("Configure and run the rolling backtest above.")
         return
 
-    errors = st.session_state["_rb_errors"]
-    crossovers = st.session_state["_rb_crossovers"]
+    errors = st.session_state[f"{rb_key_prefix}_errors"]
+    crossovers = st.session_state[f"{rb_key_prefix}_crossovers"]
+
+    is_demand = rb_key_prefix and "_demand_" in rb_key_prefix
+    unit = "MW" if is_demand else "£/MWh"
 
     if not errors:
         st.warning("No results — insufficient data for any configuration.")
@@ -129,7 +167,7 @@ def _render_rolling_backtest_body() -> None:
     st.subheader("1. Maximum Exploitable Forecast Horizon")
     st.caption(
         "The crossover point is where our forecast error first exceeds the "
-        "market's. Beyond this horizon, the forward curve is a better predictor."
+        "market's. Beyond this horizon, the benchmark is a better predictor."
     )
 
     cross_rows = []
@@ -143,8 +181,8 @@ def _render_rolling_backtest_body() -> None:
         cross_rows.append({
             "Lookback": c.lookback_label,
             "Crossover Day": c.crossover_day if c.crossover_day < 15 else ">14",
-            "Last +Alpha": f"£{c.last_positive_alpha:+.2f}",
-            "First −Alpha": f"£{c.first_negative_alpha:+.2f}" if c.crossover_day < 15 else "N/A",
+            "Last +Alpha": f"{c.last_positive_alpha:+.2f} {unit}",
+            "First −Alpha": f"{c.first_negative_alpha:+.2f} {unit}" if c.crossover_day < 15 else "N/A",
             "Verdict": verdict,
         })
     st.dataframe(pd.DataFrame(cross_rows), use_container_width=True, hide_index=True)
@@ -154,7 +192,7 @@ def _render_rolling_backtest_body() -> None:
     # ══════════════════════════════════════════════════════════════════
     st.markdown("---")
     st.subheader("2. Alpha Heatmap — Lookback × Forecast Horizon")
-    st.caption("Green = our forecast beats the market. Red = market wins.")
+    st.caption("Green = our forecast beats the benchmark. Red = benchmark wins.")
 
     error_matrix = build_error_matrix(errors)
     if not error_matrix.empty:
@@ -174,7 +212,7 @@ def _render_rolling_backtest_body() -> None:
             zmid=0,
             text=text,
             texttemplate="%{text}",
-            colorbar=dict(title="Alpha (£/MWh)"),
+            colorbar=dict(title=f"Alpha ({unit})"),
         ))
         fig_hm.update_layout(
             template=PLOTLY_TEMPLATE,
@@ -235,7 +273,7 @@ def _render_rolling_backtest_body() -> None:
         margin=dict(l=50, r=30, t=50, b=50),
         title="MAE by Forecast Horizon (days ahead)",
         xaxis_title="Forecast Horizon (days)",
-        yaxis_title="MAE (£/MWh)",
+        yaxis_title=f"MAE ({unit})",
         height=500,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
@@ -319,7 +357,7 @@ def _render_rolling_backtest_body() -> None:
         margin=dict(l=50, r=30, t=50, b=50),
         title="Alpha (Market MAE − Forecast MAE) by Horizon",
         xaxis_title="Forecast Horizon (days)",
-        yaxis_title="Alpha (£/MWh)",
+        yaxis_title=f"Alpha ({unit})",
         height=450,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
@@ -337,11 +375,11 @@ def _render_rolling_backtest_body() -> None:
         detail_rows.append({
             "Lookback": e.lookback_label,
             "Horizon": f"{e.horizon_days}d",
-            "Forecast MAE": f"£{e.forecast_mae:.2f}",
-            "Market MAE": f"£{e.market_mae:.2f}",
-            "Alpha (MAE)": f"£{e.alpha_mae:+.2f}",
+            f"Forecast MAE ({unit})": f"{e.forecast_mae:.2f}",
+            f"Benchmark MAE ({unit})": f"{e.market_mae:.2f}",
+            f"Alpha ({unit})": f"{e.alpha_mae:+.2f}",
             "Forecast MAPE": f"{e.forecast_mape:.1f}%",
-            "Market MAPE": f"{e.market_mape:.1f}%",
+            "Benchmark MAPE": f"{e.market_mape:.1f}%",
             "Alpha (MAPE)": f"{e.alpha_mape:+.1f}pp",
             "DM p-value": f"{e.dm_pvalue:.4f}",
             "Significant": sig,
@@ -384,4 +422,118 @@ def _render_rolling_backtest_body() -> None:
 **Statistical validity:**
 - DM p-values use Newey-West HAC standard errors.
 - "Significant" means p < 0.05 AND alpha > 0.
+
+**XGBoost method:**
+- Trains a fresh gradient-boosted tree per (lookback, horizon) at each origin.
+- Features: time-of-day, day-of-week, lags (1d/2d/7d), rolling stats, MIP, demand.
+- Computationally heavier but captures non-linear dynamics and interactions.
+
+**Demand target:**
+- When forecasting demand, the benchmark is the TOD-mean of demand itself
+  (how well does a simple seasonal average predict demand).
+- Demand is smoother than SIP, so baseline models perform better —
+  XGBoost adds value by capturing weather/calendar effects.
 """)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section 6: Combined SIP + Demand Alpha Analysis
+    # ══════════════════════════════════════════════════════════════════
+    _render_combined_analysis()
+
+
+def _render_combined_analysis() -> None:
+    """Show joint SIP + Demand alpha when both backtests have been run."""
+    sip_keys = [k for k in st.session_state if k.startswith("_rb_sip_") and k.endswith("_errors")]
+    demand_keys = [k for k in st.session_state if k.startswith("_rb_demand_") and k.endswith("_errors")]
+
+    if not sip_keys or not demand_keys:
+        return
+
+    st.markdown("---")
+    st.subheader("6. Combined SIP + Demand Alpha Analysis")
+    st.caption(
+        "When both a SIP and Demand rolling backtest have been run, this section "
+        "shows where you have forecast alpha on **both** axes simultaneously — "
+        "essential for capacity allocation decisions."
+    )
+
+    sip_errors = st.session_state[sip_keys[-1]]
+    demand_errors = st.session_state[demand_keys[-1]]
+
+    sip_method = sip_keys[-1].replace("_rb_sip_", "").replace("_errors", "")
+    demand_method = demand_keys[-1].replace("_rb_demand_", "").replace("_errors", "")
+
+    best_lb = "30 days"
+
+    sip_by_h = {e.horizon_days: e.alpha_mae for e in sip_errors if e.lookback_label == best_lb}
+    dem_by_h = {e.horizon_days: e.alpha_mae for e in demand_errors if e.lookback_label == best_lb}
+
+    if not sip_by_h and not dem_by_h:
+        for lb in ["15 days", "1 day"]:
+            sip_by_h = {e.horizon_days: e.alpha_mae for e in sip_errors if e.lookback_label == lb}
+            dem_by_h = {e.horizon_days: e.alpha_mae for e in demand_errors if e.lookback_label == lb}
+            if sip_by_h or dem_by_h:
+                best_lb = lb
+                break
+
+    common_days = sorted(set(sip_by_h.keys()) & set(dem_by_h.keys()))
+    if not common_days:
+        st.info("No overlapping horizons between SIP and Demand backtests.")
+        return
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=[f"{d}d" for d in common_days],
+        y=[sip_by_h[d] for d in common_days],
+        name=f"SIP Alpha ({sip_method})",
+        marker_color=COLOUR_PRIMARY,
+        opacity=0.8,
+    ))
+    fig.add_trace(go.Bar(
+        x=[f"{d}d" for d in common_days],
+        y=[dem_by_h[d] for d in common_days],
+        name=f"Demand Alpha ({demand_method})",
+        marker_color=COLOUR_SUCCESS,
+        opacity=0.8,
+    ))
+
+    fig.add_hline(y=0, line_color="white", line_width=1, line_dash="dash")
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        barmode="group",
+        title=f"Joint Alpha by Horizon (lookback: {best_lb})",
+        xaxis_title="Forecast Horizon",
+        yaxis_title="Alpha (lower error than benchmark)",
+        height=450,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    both_positive = [d for d in common_days if sip_by_h[d] > 0 and dem_by_h[d] > 0]
+    if both_positive:
+        st.success(
+            f"**Joint alpha detected at horizons:** {', '.join(f'{d}d' for d in both_positive)}. "
+            f"At these horizons, you can forecast both price AND demand better than their "
+            f"respective benchmarks — these are the strongest signals for capacity allocation."
+        )
+    else:
+        st.warning(
+            "No horizons found where both SIP and Demand forecasts simultaneously "
+            "beat their benchmarks. Consider adjusting methods or lookback windows."
+        )
+
+    combo_rows = []
+    for d in common_days:
+        sip_a = sip_by_h[d]
+        dem_a = dem_by_h[d]
+        combined = sip_a + dem_a
+        both = "✅" if sip_a > 0 and dem_a > 0 else "❌"
+        combo_rows.append({
+            "Horizon": f"{d}d",
+            "SIP Alpha (£/MWh)": f"{sip_a:+.2f}",
+            "Demand Alpha (MW)": f"{dem_a:+.2f}",
+            "Combined Score": f"{combined:+.2f}",
+            "Both Positive": both,
+        })
+    st.dataframe(pd.DataFrame(combo_rows), use_container_width=True, hide_index=True)

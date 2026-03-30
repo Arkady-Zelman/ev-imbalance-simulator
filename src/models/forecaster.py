@@ -190,6 +190,7 @@ def run_walk_forward_backtest(
     min_history: int = 96,
     step: int = 1,
     ewma_alpha: float = 0.05,
+    demand_series: Optional[pd.Series] = None,
 ) -> List[ForecastResult]:
     """
     Walk-forward backtest: at each origin point, produce forecasts for
@@ -201,16 +202,18 @@ def run_walk_forward_backtest(
     mip_series : Half-hourly MIP indexed by datetime (aligned to sip_series)
     lookback_sps : Lookback window in settlement periods
     horizons : Forecast horizons in settlement periods
-    method : "tod_mean" or "ewma"
+    method : "tod_mean", "ewma", or "xgb"
     min_history : Minimum data points before first forecast
     step : Step size between origins (1 = every SP, 48 = daily)
     ewma_alpha : EWMA smoothing parameter (higher = more weight on recent obs)
+    demand_series : Optional half-hourly demand (used as feature by XGBoost)
     """
     if horizons is None:
         horizons = DEFAULT_HORIZONS
 
     sip_values = sip_series.values.astype(float)
     mip_values = mip_series.values.astype(float)
+    demand_values = demand_series.values.astype(float) if demand_series is not None else None
     n = len(sip_values)
 
     max_horizon = max(horizons)
@@ -226,13 +229,18 @@ def run_walk_forward_backtest(
 
     results: List[ForecastResult] = []
 
-    forecast_fn = _ewma_forecast if method == "ewma" else _tod_mean_forecast
-
     for idx in range(start_idx, end_idx, step):
-        if method == "ewma":
-            fc = forecast_fn(sip_values, idx, lookback_sps, horizons, alpha=ewma_alpha)
+        if method == "xgb":
+            from src.models.xgb_forecaster import _xgb_forecast
+
+            fc = _xgb_forecast(
+                sip_values, idx, lookback_sps, horizons,
+                mip_values=mip_values, demand_values=demand_values,
+            )
+        elif method == "ewma":
+            fc = _ewma_forecast(sip_values, idx, lookback_sps, horizons, alpha=ewma_alpha)
         else:
-            fc = forecast_fn(sip_values, idx, lookback_sps, horizons)
+            fc = _tod_mean_forecast(sip_values, idx, lookback_sps, horizons)
 
         realised = _extract_realised(sip_values, idx, horizons)
         market_fwd = _extract_market_forward(mip_values, idx, horizons,
@@ -261,10 +269,14 @@ def run_walk_forward_backtest(
 def build_aligned_series(
     sip_df: pd.DataFrame,
     mip_df: pd.DataFrame,
-) -> Tuple[pd.Series, pd.Series]:
+    demand_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.Series, pd.Series, Optional[pd.Series]]:
     """
-    Align SIP and MIP DataFrames into half-hourly Series with a common
-    datetime index.
+    Align SIP, MIP (and optionally Demand) DataFrames into half-hourly
+    Series with a common datetime index.
+
+    Returns (sip_series, mip_series, demand_series).
+    demand_series is None when demand_df is not provided or empty.
     """
     sip_col = "systemBuyPrice" if "systemBuyPrice" in sip_df.columns else "systemSellPrice"
 
@@ -284,8 +296,22 @@ def build_aligned_series(
     mip = mip[~mip.index.duplicated(keep="first")]
 
     common_idx = sip.index.intersection(mip.index)
-    if len(common_idx) == 0:
-        logger.warning("No overlapping timestamps between SIP and MIP")
-        return sip, mip
 
-    return sip.loc[common_idx], mip.loc[common_idx]
+    demand_series: Optional[pd.Series] = None
+    if demand_df is not None and not demand_df.empty:
+        dem = demand_df.copy()
+        dem["datetime"] = pd.to_datetime(dem["settlementDate"]) + pd.to_timedelta(
+            (dem["settlementPeriod"].astype(int) - 1) * 30, unit="min"
+        )
+        dem_col = "initialDemandOutturn" if "initialDemandOutturn" in dem.columns else dem.columns[-1]
+        dem = dem.set_index("datetime")[dem_col].sort_index()
+        dem = dem[~dem.index.duplicated(keep="first")]
+        common_idx = common_idx.intersection(dem.index)
+        if len(common_idx) > 0:
+            demand_series = dem.loc[common_idx]
+
+    if len(common_idx) == 0:
+        logger.warning("No overlapping timestamps between SIP, MIP and Demand")
+        return sip, mip, None
+
+    return sip.loc[common_idx], mip.loc[common_idx], demand_series

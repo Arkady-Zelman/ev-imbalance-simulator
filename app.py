@@ -29,7 +29,7 @@ from src.config import (
     SIP_STRESS_DISPATCH_PENALTY,
     SIP_STRESS_PLUGIN_FACTOR,
 )
-from src.data.elexon_client import fetch_market_index, fetch_system_prices
+from src.data.elexon_client import fetch_demand_outturn, fetch_market_index, fetch_system_prices
 from src.models.kelly import kelly_optimal_position, run_kelly_analysis
 from src.models.monte_carlo import SimulationParams, prepare_sip_matrix, run_simulation
 from src.models.risk_metrics import compute_capture_ratios, compute_risk_summary
@@ -47,6 +47,7 @@ from src.session_keys import (
     DA_PRICE,
     DATE_FROM,
     DATE_TO,
+    DEMAND_DF,
     KELLY_RESULTS,
     MIP_DF,
     PARAMS,
@@ -333,9 +334,10 @@ with st.sidebar:
 # ── Run simulation on button click ────────────────────────────────────────
 
 if run_clicked:
-    with st.spinner("Fetching ELEXON market data…"):
+    with st.spinner("Fetching ELEXON market data (SIP + MIP + Demand)…"):
         sip_df = fetch_system_prices(date_from, date_to)
         mip_df = fetch_market_index(date_from, date_to)
+        demand_df = fetch_demand_outturn(date_from, date_to)
 
     if sip_df.empty:
         st.error("No SIP data returned from ELEXON. Check your date range or network connection.")
@@ -431,6 +433,7 @@ if run_clicked:
     st.session_state[SIP_MODE] = sip_mode
     st.session_state[SIZING_METHOD] = sizing_method
     st.session_state[BANKROLL] = bankroll
+    st.session_state[DEMAND_DF] = demand_df
     st.session_state[KELLY_RESULTS] = kelly_results
 
 # ── Tab routing ───────────────────────────────────────────────────────────

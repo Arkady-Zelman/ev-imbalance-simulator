@@ -24,6 +24,8 @@ from src.models.forecaster import (
 )
 from src.models.stat_tests import diebold_mariano
 
+from typing import Optional
+
 logger = logging.getLogger(__name__)
 
 # Day-level lookbacks (in settlement periods)
@@ -71,12 +73,20 @@ def run_rolling_backtest(
     mip_series: pd.Series,
     method: str = "tod_mean",
     ewma_alpha: float = 0.05,
+    target: str = "sip",
+    demand_series: Optional[pd.Series] = None,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
     """
     Run the full rolling backtest across all lookback × horizon combos.
 
     Steps daily (step=48) to keep origins non-overlapping for valid
     statistical inference.
+
+    Parameters
+    ----------
+    target : "sip" (default) or "demand" — which series to forecast.
+    demand_series : Half-hourly demand, used as feature (target=sip) or
+                    forecast target (target=demand).
 
     Returns
     -------
@@ -85,10 +95,20 @@ def run_rolling_backtest(
     """
     sip_values = sip_series.values.astype(float)
     mip_values = mip_series.values.astype(float)
-    n = len(sip_values)
+    demand_values = demand_series.values.astype(float) if demand_series is not None else None
 
-    forecast_fn = _ewma_forecast if method == "ewma" else _tod_mean_forecast
-    step = 48  # daily origins for non-overlapping statistical validity
+    if target == "demand":
+        if demand_values is None:
+            logger.warning("Demand target requested but no demand data provided.")
+            return [], []
+        target_values = demand_values
+        benchmark_values = demand_values
+    else:
+        target_values = sip_values
+        benchmark_values = mip_values
+
+    n = len(target_values)
+    step = 48
 
     errors: List[RollingErrorRow] = []
 
@@ -101,18 +121,31 @@ def run_rolling_backtest(
             if start_idx >= end_idx:
                 continue
 
-            fc_errors_list = []
-            mkt_errors_list = []
-            realised_list = []
+            fc_errors_list: list[float] = []
+            mkt_errors_list: list[float] = []
+            realised_list: list[float] = []
 
             for idx in range(start_idx, end_idx, step):
-                if method == "ewma":
-                    fc = forecast_fn(sip_values, idx, lb_sps, [h_sps], alpha=ewma_alpha)
-                else:
-                    fc = forecast_fn(sip_values, idx, lb_sps, [h_sps])
+                if method == "xgb":
+                    from src.models.xgb_forecaster import _xgb_demand_forecast, _xgb_forecast
 
-                realised = _extract_realised(sip_values, idx, [h_sps])
-                market_fwd = _extract_market_forward(mip_values, idx, [h_sps],
+                    if target == "demand":
+                        fc = _xgb_demand_forecast(
+                            demand_values, idx, lb_sps, [h_sps],  # type: ignore[arg-type]
+                            sip_values=sip_values,
+                        )
+                    else:
+                        fc = _xgb_forecast(
+                            sip_values, idx, lb_sps, [h_sps],
+                            mip_values=mip_values, demand_values=demand_values,
+                        )
+                elif method == "ewma":
+                    fc = _ewma_forecast(target_values, idx, lb_sps, [h_sps], alpha=ewma_alpha)
+                else:
+                    fc = _tod_mean_forecast(target_values, idx, lb_sps, [h_sps])
+
+                realised = _extract_realised(target_values, idx, [h_sps])
+                market_fwd = _extract_market_forward(benchmark_values, idx, [h_sps],
                                                      lookback_sps=lb_sps)
 
                 if h_sps not in fc or h_sps not in realised or h_sps not in market_fwd:

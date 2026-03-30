@@ -60,6 +60,15 @@ def render() -> None:
             "Format": "JSON (nested)",
             "Fields Used": "netImbalanceVolume",
         },
+        {
+            "Data": "Demand Outturn (INDO/ITSDO)",
+            "Provider": "ELEXON Insights API",
+            "Endpoint": f"`GET {ELEXON_BASE_URL}/demand/outturn?settlementDateFrom=...&settlementDateTo=...`",
+            "API Key Required": "No (public)",
+            "Update Frequency": "Half-hourly",
+            "Format": "JSON",
+            "Fields Used": "settlementDate, settlementPeriod, initialDemandOutturn, initialTransmissionSystemDemandOutturn",
+        },
     ])
     st.dataframe(sources, use_container_width=True, hide_index=True)
 
@@ -77,6 +86,12 @@ data = response.json()["data"]
 # Market Index Price — query-based datetime range
 url = "https://data.elexon.co.uk/bmrs/api/v1/balancing/pricing/market-index"
 params = {"from": "2025-12-01T00:00Z", "to": "2025-12-02T00:00Z", "format": "json"}
+response = requests.get(url, params=params)
+data = response.json()["data"]
+
+# Demand Outturn — query-based settlement date range
+url = "https://data.elexon.co.uk/bmrs/api/v1/demand/outturn"
+params = {"settlementDateFrom": "2025-12-01", "settlementDateTo": "2025-12-02", "format": "json"}
 response = requests.get(url, params=params)
 data = response.json()["data"]
 """, language="python")

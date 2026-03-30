@@ -31,7 +31,7 @@ from src.models.forecaster import (
     build_aligned_series,
     run_walk_forward_backtest,
 )
-from src.session_keys import BACKTEST_RESULTS, MIP_DF, SIP_DF
+from src.session_keys import BACKTEST_RESULTS, DEMAND_DF, MIP_DF, SIP_DF
 from src.visualization.charts import (
     alpha_heatmap,
     confirmation_hit_rate_chart,
@@ -114,8 +114,8 @@ def _render_backtesting_body() -> None:
         selected_lookbacks = [available_lookbacks[lb] for lb in selected_lb_labels]
 
     with col2:
-        method = st.radio("Forecast method", ["TOD Mean", "EWMA"], horizontal=True)
-        method_key = "tod_mean" if method == "TOD Mean" else "ewma"
+        method = st.radio("Forecast method", ["TOD Mean", "EWMA", "XGBoost"], horizontal=True)
+        method_key = {"TOD Mean": "tod_mean", "EWMA": "ewma", "XGBoost": "xgb"}[method]
 
     with col3:
         step_size = st.select_slider(
@@ -146,8 +146,11 @@ def _render_backtesting_body() -> None:
     # Run backtest
     # ══════════════════════════════════════════════════════════════════
     if run_backtest:
-        with st.spinner("Aligning SIP and MIP series…"):
-            sip_series, mip_series = build_aligned_series(sip_df, mip_df)
+        demand_df = st.session_state.get(DEMAND_DF)
+        with st.spinner("Aligning SIP, MIP and Demand series…"):
+            sip_series, mip_series, demand_series = build_aligned_series(
+                sip_df, mip_df, demand_df=demand_df,
+            )
 
         if len(sip_series) < 96:
             st.error(f"Insufficient aligned data: only {len(sip_series)} data points. Need at least 96.")
@@ -170,6 +173,7 @@ def _render_backtesting_body() -> None:
                     method=method_key,
                     step=step_size,
                     ewma_alpha=ewma_alpha,
+                    demand_series=demand_series,
                 )
                 backtest_results[(lb, method_key)] = results
             progress.progress((i + 1) / total)

@@ -13,7 +13,7 @@ from src.models.rolling_backtest import (
 
 
 def _make_long_series(n_days: int = 90, seed: int = 42):
-    """Create synthetic SIP and MIP series long enough for rolling backtest."""
+    """Create synthetic SIP, MIP, and Demand series long enough for rolling backtest."""
     rng = np.random.default_rng(seed)
     n_sps = n_days * 48
     base = 50 + 30 * np.sin(np.linspace(0, 2 * np.pi * n_sps / 48, n_sps))
@@ -25,7 +25,11 @@ def _make_long_series(n_days: int = 90, seed: int = 42):
         base + rng.normal(0, 8, n_sps),
         index=sip.index,
     )
-    return sip, mip
+    demand = pd.Series(
+        30000 + 5000 * np.sin(np.linspace(0, 2 * np.pi * n_sps / 48, n_sps)) + rng.normal(0, 500, n_sps),
+        index=sip.index,
+    )
+    return sip, mip, demand
 
 
 class TestRunRollingBacktest:
@@ -34,7 +38,7 @@ class TestRunRollingBacktest:
         return _make_long_series(90)
 
     def test_returns_errors_and_crossovers(self, long_series):
-        sip, mip = long_series
+        sip, mip, _ = long_series
         errors, crossovers = run_rolling_backtest(sip, mip)
         assert isinstance(errors, list)
         assert isinstance(crossovers, list)
@@ -42,7 +46,7 @@ class TestRunRollingBacktest:
         assert len(crossovers) == 3  # one per lookback
 
     def test_error_fields(self, long_series):
-        sip, mip = long_series
+        sip, mip, _ = long_series
         errors, _ = run_rolling_backtest(sip, mip)
         e = errors[0]
         assert isinstance(e, RollingErrorRow)
@@ -53,7 +57,7 @@ class TestRunRollingBacktest:
         assert e.n_obs > 0
 
     def test_crossover_fields(self, long_series):
-        sip, mip = long_series
+        sip, mip, _ = long_series
         _, crossovers = run_rolling_backtest(sip, mip)
         c = crossovers[0]
         assert isinstance(c, CrossoverResult)
@@ -61,14 +65,46 @@ class TestRunRollingBacktest:
 
     def test_insufficient_data(self):
         """Short series should return empty or few results."""
-        sip, mip = _make_long_series(10)
+        sip, mip, _ = _make_long_series(10)
         errors, crossovers = run_rolling_backtest(sip, mip)
         assert isinstance(errors, list)
 
 
+class TestDemandTarget:
+    @pytest.fixture
+    def long_series(self):
+        return _make_long_series(90)
+
+    def test_demand_target_returns_results(self, long_series):
+        sip, mip, demand = long_series
+        errors, crossovers = run_rolling_backtest(
+            sip, mip, target="demand", demand_series=demand,
+        )
+        assert isinstance(errors, list)
+        assert len(errors) > 0
+        assert len(crossovers) == 3
+
+    def test_demand_target_no_data_returns_empty(self, long_series):
+        sip, mip, _ = long_series
+        errors, crossovers = run_rolling_backtest(
+            sip, mip, target="demand", demand_series=None,
+        )
+        assert errors == []
+        assert crossovers == []
+
+    def test_demand_error_fields(self, long_series):
+        sip, mip, demand = long_series
+        errors, _ = run_rolling_backtest(
+            sip, mip, target="demand", demand_series=demand,
+        )
+        e = errors[0]
+        assert e.forecast_mae >= 0
+        assert e.n_obs > 0
+
+
 class TestBuildErrorMatrix:
     def test_pivot_shape(self):
-        sip, mip = _make_long_series(90)
+        sip, mip, _ = _make_long_series(90)
         errors, _ = run_rolling_backtest(sip, mip)
         matrix = build_error_matrix(errors)
         assert isinstance(matrix, pd.DataFrame)

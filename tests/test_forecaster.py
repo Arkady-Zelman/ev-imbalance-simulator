@@ -105,6 +105,6 @@ class TestBuildAlignedSeries:
             })
         sip_df = pd.DataFrame(sip_rows)
         mip_df = pd.DataFrame(mip_rows)
-        sip_s, mip_s = build_aligned_series(sip_df, mip_df)
+        sip_s, mip_s, _ = build_aligned_series(sip_df, mip_df)
         assert len(sip_s) == len(mip_s)
         assert len(sip_s) <= 48
