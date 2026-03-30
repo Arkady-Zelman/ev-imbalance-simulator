@@ -125,6 +125,17 @@ def _build_features(
     return np.array(feats, dtype=np.float32)
 
 
+_DEFAULT_XGB_PARAMS: Dict[str, object] = {
+    "n_estimators": 80,
+    "max_depth": 4,
+    "learning_rate": 0.1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+}
+
+
 def _xgb_forecast(
     sip_values: np.ndarray,
     origin_idx: int,
@@ -132,16 +143,26 @@ def _xgb_forecast(
     horizons: List[int],
     mip_values: Optional[np.ndarray] = None,
     demand_values: Optional[np.ndarray] = None,
+    xgb_params: Optional[Dict[str, object]] = None,
 ) -> Dict[int, float]:
     """
     XGBoost SIP forecast: trains one model per horizon on the lookback window,
     then predicts the value at origin + horizon.
+
+    Parameters
+    ----------
+    xgb_params : Optional dict of XGBRegressor kwargs. When provided, these
+                 override the hardcoded defaults. Pass tuned params from grid search.
     """
     if not _HAS_XGB:
         logger.warning("xgboost not installed — falling back to TOD mean")
         from src.models.forecaster import _tod_mean_forecast
 
         return _tod_mean_forecast(sip_values, origin_idx, lookback_sps, horizons)
+
+    params = dict(_DEFAULT_XGB_PARAMS)
+    if xgb_params is not None:
+        params.update(xgb_params)
 
     n = len(sip_values)
     forecasts: Dict[int, float] = {}
@@ -177,13 +198,7 @@ def _xgb_forecast(
             X[nan_mask[:, c], c] = col_means[c]
 
         model = xgb.XGBRegressor(
-            n_estimators=80,
-            max_depth=4,
-            learning_rate=0.1,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
+            **params,
             random_state=42,
             verbosity=0,
             n_jobs=1,
@@ -205,6 +220,7 @@ def _xgb_demand_forecast(
     lookback_sps: int,
     horizons: List[int],
     sip_values: Optional[np.ndarray] = None,
+    xgb_params: Optional[Dict[str, object]] = None,
 ) -> Dict[int, float]:
     """
     XGBoost demand forecast: trains one model per horizon on the lookback
@@ -223,4 +239,5 @@ def _xgb_demand_forecast(
         horizons=horizons,
         mip_values=None,
         demand_values=sip_values,
+        xgb_params=xgb_params,
     )

@@ -28,6 +28,13 @@ from src.models.rolling_backtest import (
     build_error_matrix,
     run_rolling_backtest,
 )
+from src.models.xgb_trainer import (
+    forecast_forward,
+    has_trained_models,
+    load_trained_models,
+    save_trained_models,
+    train_xgb_models,
+)
 from src.session_keys import DEMAND_DF, MIP_DF, SIP_DF
 
 
@@ -89,60 +96,148 @@ def _render_rolling_backtest_body() -> None:
             help="Only used when EWMA is selected.",
         )
 
-    if method_key == "xgb":
-        st.info(
-            "XGBoost trains a fresh model per (lookback, horizon) at each origin. "
-            "This is significantly slower than the naive methods — expect several minutes."
-        )
-
     if target_key == "demand" and not has_demand:
         st.warning("No demand data available. Run a simulation with demand data first.")
         return
 
-    run_btn = st.button(
-        "🔬 Run Rolling Backtest",
-        use_container_width=True,
-        type="primary",
-        key="rb_run",
-    )
-
-    if run_btn:
-        with st.spinner("Aligning SIP, MIP and Demand series…"):
-            sip_series, mip_series, demand_series = build_aligned_series(
-                sip_df, mip_df, demand_df=demand_df,
-            )
-
-        n_days = len(sip_series) // 48
-        if n_days < 45:
-            st.error(
-                f"Need at least 45 days of aligned data for a meaningful rolling backtest. "
-                f"Currently have {n_days} days. Increase the date range."
-            )
-            return
-
-        target_desc = "Demand" if target_key == "demand" else "SIP"
-        st.caption(f"Data: {len(sip_series):,} SPs ({n_days} days) — "
-                   f"{sip_series.index[0]} → {sip_series.index[-1]}  |  "
-                   f"Target: **{target_desc}**  |  Method: **{method}**")
-
-        spinner_msg = (
-            f"Running rolling backtest ({method}, {target_desc}, "
-            f"1/15/30-day lookbacks × 1-14 day horizons)…"
+    # ── XGBoost: Train / Show Results workflow ────────────────────────
+    if method_key == "xgb":
+        st.markdown("---")
+        st.subheader("XGBoost Model Training")
+        st.caption(
+            "Train once with grid search, then view results anytime. "
+            "Models are saved to disk and persist across sessions."
         )
-        with st.spinner(spinner_msg):
-            errors, crossovers = run_rolling_backtest(
-                sip_series, mip_series,
-                method=method_key,
-                ewma_alpha=ewma_alpha,
-                target=target_key,
-                demand_series=demand_series,
+
+        col_train, col_show = st.columns(2)
+        with col_train:
+            train_btn = st.button(
+                "🏋️ Train XGBoost Model",
+                use_container_width=True,
+                type="primary",
+                key="rb_xgb_train",
+                help="Grid search over 27 hyperparameter combos per lookback/horizon, "
+                     "then run rolling backtest with best params. Takes several minutes.",
+            )
+        with col_show:
+            show_btn = st.button(
+                "📊 Show Results",
+                use_container_width=True,
+                key="rb_xgb_show",
+                help="Load and display results from the last trained model.",
             )
 
-        rb_key_prefix = f"_rb_{target_key}_{method_key}"
-        st.session_state[f"{rb_key_prefix}_errors"] = errors
-        st.session_state[f"{rb_key_prefix}_crossovers"] = crossovers
-        st.session_state["_rb_last_key"] = rb_key_prefix
-        st.success(f"Rolling backtest complete — {len(errors)} configurations evaluated.")
+        if train_btn:
+            with st.spinner("Aligning SIP, MIP and Demand series…"):
+                sip_series, mip_series, demand_series = build_aligned_series(
+                    sip_df, mip_df, demand_df=demand_df,
+                )
+            n_days = len(sip_series) // 48
+            if n_days < 45:
+                st.error(
+                    f"Need at least 45 days of aligned data. "
+                    f"Currently have {n_days} days. Increase the date range."
+                )
+                return
+
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            def _progress(frac: float, msg: str) -> None:
+                progress_bar.progress(min(frac, 1.0))
+                status_text.caption(msg)
+
+            trained = train_xgb_models(
+                sip_series, mip_series,
+                demand_series=demand_series,
+                progress_callback=_progress,
+            )
+            progress_bar.empty()
+            status_text.empty()
+
+            save_trained_models(trained)
+            st.session_state["_xgb_trained_models"] = trained
+
+            _display_training_summary(trained)
+
+            rb_key_prefix = f"_rb_{target_key}_{method_key}"
+            st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
+            st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
+            st.session_state["_rb_last_key"] = rb_key_prefix
+            st.success(
+                f"Training complete — {len(trained.backtest_errors)} backtest "
+                f"configurations evaluated. Model saved to disk."
+            )
+
+        if show_btn:
+            trained = st.session_state.get("_xgb_trained_models")
+            if trained is None:
+                trained = load_trained_models()
+                if trained is not None:
+                    st.session_state["_xgb_trained_models"] = trained
+
+            if trained is None:
+                st.info(
+                    "No trained model found. Press **Train XGBoost Model** first."
+                )
+                return
+
+            import datetime as dt
+            ts = dt.datetime.fromtimestamp(trained.training_timestamp)
+            st.caption(f"Loaded model trained at **{ts:%Y-%m-%d %H:%M}**")
+            _display_training_summary(trained)
+
+            rb_key_prefix = f"_rb_{target_key}_{method_key}"
+            st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
+            st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
+            st.session_state["_rb_last_key"] = rb_key_prefix
+
+    else:
+        # ── TOD Mean / EWMA: standard single-button flow ─────────────
+        run_btn = st.button(
+            "🔬 Run Rolling Backtest",
+            use_container_width=True,
+            type="primary",
+            key="rb_run",
+        )
+
+        if run_btn:
+            with st.spinner("Aligning SIP, MIP and Demand series…"):
+                sip_series, mip_series, demand_series = build_aligned_series(
+                    sip_df, mip_df, demand_df=demand_df,
+                )
+
+            n_days = len(sip_series) // 48
+            if n_days < 45:
+                st.error(
+                    f"Need at least 45 days of aligned data for a meaningful rolling backtest. "
+                    f"Currently have {n_days} days. Increase the date range."
+                )
+                return
+
+            target_desc = "Demand" if target_key == "demand" else "SIP"
+            st.caption(f"Data: {len(sip_series):,} SPs ({n_days} days) — "
+                       f"{sip_series.index[0]} → {sip_series.index[-1]}  |  "
+                       f"Target: **{target_desc}**  |  Method: **{method}**")
+
+            spinner_msg = (
+                f"Running rolling backtest ({method}, {target_desc}, "
+                f"1/5/15/30-day lookbacks × 1-14 day horizons)…"
+            )
+            with st.spinner(spinner_msg):
+                errors, crossovers = run_rolling_backtest(
+                    sip_series, mip_series,
+                    method=method_key,
+                    ewma_alpha=ewma_alpha,
+                    target=target_key,
+                    demand_series=demand_series,
+                )
+
+            rb_key_prefix = f"_rb_{target_key}_{method_key}"
+            st.session_state[f"{rb_key_prefix}_errors"] = errors
+            st.session_state[f"{rb_key_prefix}_crossovers"] = crossovers
+            st.session_state["_rb_last_key"] = rb_key_prefix
+            st.success(f"Rolling backtest complete — {len(errors)} configurations evaluated.")
 
     # ── Results ───────────────────────────────────────────────────────
     rb_key_prefix = st.session_state.get("_rb_last_key")
@@ -236,6 +331,7 @@ def _render_rolling_backtest_body() -> None:
 
     lb_colours = {
         "1 day": COLOUR_PRIMARY,
+        "5 days": COLOUR_MUTED,
         "15 days": COLOUR_WARNING,
         "30 days": COLOUR_SUCCESS,
     }
@@ -436,9 +532,121 @@ def _render_rolling_backtest_body() -> None:
 """)
 
     # ══════════════════════════════════════════════════════════════════
-    # Section 6: Combined SIP + Demand Alpha Analysis
+    # Section 6: 14-Day Forward Forecast (XGBoost only)
+    # ══════════════════════════════════════════════════════════════════
+    _render_forward_forecast()
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section 7: Combined SIP + Demand Alpha Analysis
     # ══════════════════════════════════════════════════════════════════
     _render_combined_analysis()
+
+
+def _display_training_summary(trained) -> None:
+    """Show a compact summary of best params from grid search."""
+    summary_rows = []
+    for lb_label in trained.best_params:
+        for h_sps, params in trained.best_params[lb_label].items():
+            h_days = h_sps // 48
+            score = trained.best_scores.get(lb_label, {}).get(h_sps, float("nan"))
+            summary_rows.append({
+                "Lookback": lb_label,
+                "Horizon": f"{h_days}d",
+                "n_estimators": params.get("n_estimators"),
+                "max_depth": params.get("max_depth"),
+                "learning_rate": params.get("learning_rate"),
+                "Val MAE": f"{score:.2f}" if score != float("inf") else "N/A",
+            })
+    if summary_rows:
+        with st.expander("Grid Search Results — Best Params per (Lookback, Horizon)"):
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+
+def _render_forward_forecast() -> None:
+    """Show 14-day forward forecast from trained XGBoost models."""
+    trained = st.session_state.get("_xgb_trained_models")
+    if trained is None or not trained.final_models:
+        return
+
+    sip_df = st.session_state.get(SIP_DF)
+    mip_df = st.session_state.get(MIP_DF)
+    demand_df = st.session_state.get(DEMAND_DF)
+
+    if sip_df is None or sip_df.empty or mip_df is None or mip_df.empty:
+        return
+
+    from src.models.forecaster import build_aligned_series
+
+    sip_series, mip_series, demand_series = build_aligned_series(
+        sip_df, mip_df, demand_df=demand_df,
+    )
+
+    sip_values = sip_series.values.astype(float)
+    mip_values = mip_series.values.astype(float)
+    demand_values = demand_series.values.astype(float) if demand_series is not None else None
+
+    forecasts = forecast_forward(
+        trained, sip_values, mip_values, demand_values, n_days=14,
+    )
+
+    if not forecasts:
+        return
+
+    st.markdown("---")
+    st.subheader("6. 14-Day Forward Forecast (XGBoost)")
+    st.caption(
+        "Each curve shows the model's point forecast from the latest data point, "
+        "using the trained model for each lookback window. Compare how different "
+        "lookback windows produce different forward views."
+    )
+
+    last_date = sip_series.index[-1]
+    lb_colours = {
+        "1 day": COLOUR_PRIMARY,
+        "5 days": COLOUR_MUTED,
+        "15 days": COLOUR_WARNING,
+        "30 days": COLOUR_SUCCESS,
+    }
+
+    fig = go.Figure()
+    for lb_label, day_forecasts in forecasts.items():
+        if not day_forecasts:
+            continue
+        days = sorted(day_forecasts.keys())
+        dates = [last_date + pd.Timedelta(days=d) for d in days]
+        values = [day_forecasts[d] for d in days]
+        colour = lb_colours.get(lb_label, COLOUR_MUTED)
+
+        fig.add_trace(go.Scatter(
+            x=dates, y=values,
+            mode="lines+markers",
+            name=f"{lb_label} lookback",
+            line=dict(color=colour, width=2),
+            marker=dict(size=6),
+        ))
+
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title="XGBoost Forward Forecast — Next 14 Days",
+        xaxis_title="Date",
+        yaxis_title="Predicted SIP (£/MWh)",
+        height=500,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    fc_rows = []
+    for lb_label, day_forecasts in forecasts.items():
+        for d in sorted(day_forecasts.keys()):
+            fc_rows.append({
+                "Lookback": lb_label,
+                "Day Ahead": d,
+                "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
+                "Forecast (£/MWh)": f"{day_forecasts[d]:.2f}",
+            })
+    if fc_rows:
+        with st.expander("Forward Forecast Data"):
+            st.dataframe(pd.DataFrame(fc_rows), use_container_width=True, hide_index=True)
 
 
 def _render_combined_analysis() -> None:
@@ -450,7 +658,7 @@ def _render_combined_analysis() -> None:
         return
 
     st.markdown("---")
-    st.subheader("6. Combined SIP + Demand Alpha Analysis")
+    st.subheader("7. Combined SIP + Demand Alpha Analysis")
     st.caption(
         "When both a SIP and Demand rolling backtest have been run, this section "
         "shows where you have forecast alpha on **both** axes simultaneously — "

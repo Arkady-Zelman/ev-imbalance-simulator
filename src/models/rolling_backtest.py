@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Day-level lookbacks (in settlement periods)
 ROLLING_LOOKBACKS = {
     "1 day": 48,
+    "5 days": 48 * 5,
     "15 days": 48 * 15,
     "30 days": 48 * 30,
 }
@@ -75,6 +76,7 @@ def run_rolling_backtest(
     ewma_alpha: float = 0.05,
     target: str = "sip",
     demand_series: Optional[pd.Series] = None,
+    xgb_params: Optional[Dict] = None,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
     """
     Run the full rolling backtest across all lookback × horizon combos.
@@ -133,11 +135,13 @@ def run_rolling_backtest(
                         fc = _xgb_demand_forecast(
                             demand_values, idx, lb_sps, [h_sps],  # type: ignore[arg-type]
                             sip_values=sip_values,
+                            xgb_params=xgb_params,
                         )
                     else:
                         fc = _xgb_forecast(
                             sip_values, idx, lb_sps, [h_sps],
                             mip_values=mip_values, demand_values=demand_values,
+                            xgb_params=xgb_params,
                         )
                 elif method == "ewma":
                     fc = _ewma_forecast(target_values, idx, lb_sps, [h_sps], alpha=ewma_alpha)
