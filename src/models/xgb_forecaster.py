@@ -166,16 +166,21 @@ def _xgb_forecast(
 
     n = len(sip_values)
     forecasts: Dict[int, float] = {}
-    start = max(0, origin_idx - lookback_sps)
+    _FEATURE_HISTORY = 48 + 336  # minimum indices needed for feature builder
+    _MIN_SAMPLES = 30
 
     for h in horizons:
         if origin_idx + h >= n:
             continue
 
+        min_window = _FEATURE_HISTORY + h + _MIN_SAMPLES
+        effective_lb = max(lookback_sps, min_window)
+        start = max(0, origin_idx - effective_lb)
+
         X_rows: list[np.ndarray] = []
         y_rows: list[float] = []
 
-        train_start = max(start, 48 + 336)
+        train_start = max(start, _FEATURE_HISTORY)
         for i in range(train_start, origin_idx):
             if i + h >= origin_idx:
                 break

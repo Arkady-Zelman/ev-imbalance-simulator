@@ -100,10 +100,15 @@ def _build_train_data(
     Uses the latest available data (end of array) as the training window.
     Returns (X, y, col_means) or (None, None, None) if insufficient data.
     """
+    _FEATURE_HISTORY = 48 + 336
+    _MIN_SAMPLES = 50
+
     n = len(target_values)
     end_idx = n - horizon_sps
-    start_idx = max(0, end_idx - lookback_sps)
-    train_start = max(start_idx, 48 + 336)
+    min_window = _FEATURE_HISTORY + _MIN_SAMPLES
+    effective_lb = max(lookback_sps, min_window)
+    start_idx = max(0, end_idx - effective_lb)
+    train_start = max(start_idx, _FEATURE_HISTORY)
 
     X_rows: list[np.ndarray] = []
     y_rows: list[float] = []
