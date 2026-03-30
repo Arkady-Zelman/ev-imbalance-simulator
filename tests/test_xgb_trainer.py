@@ -138,19 +138,56 @@ class TestForecastForward:
 
 @pytest.mark.skipif(not HAS_XGB or not HAS_JOBLIB, reason="xgboost/joblib not installed")
 class TestDiskPersistence:
-    def test_save_and_load(self, tmp_path, monkeypatch):
+    def test_save_and_load_sip(self, tmp_path, monkeypatch):
         import src.models.xgb_trainer as trainer_mod
 
         monkeypatch.setattr(trainer_mod, "_CACHE_DIR", tmp_path)
-        monkeypatch.setattr(trainer_mod, "_MODEL_FILE", tmp_path / "test_model.joblib")
 
         sip, mip, demand = _make_series(90)
-        trained = train_xgb_models(sip, mip, demand_series=demand)
+        trained = train_xgb_models(sip, mip, demand_series=demand, target="sip")
 
-        assert save_trained_models(trained)
-        assert has_trained_models()
+        assert save_trained_models(trained, target="sip")
+        assert has_trained_models(target="sip")
+        assert not has_trained_models(target="demand")
 
-        loaded = load_trained_models()
+        loaded = load_trained_models(target="sip")
         assert loaded is not None
+        assert loaded.target == "sip"
         assert loaded.training_timestamp == trained.training_timestamp
         assert len(loaded.best_params) == len(trained.best_params)
+
+    def test_save_and_load_demand(self, tmp_path, monkeypatch):
+        import src.models.xgb_trainer as trainer_mod
+
+        monkeypatch.setattr(trainer_mod, "_CACHE_DIR", tmp_path)
+
+        sip, mip, demand = _make_series(90)
+        trained = train_xgb_models(sip, mip, demand_series=demand, target="demand")
+
+        assert save_trained_models(trained, target="demand")
+        assert has_trained_models(target="demand")
+
+        loaded = load_trained_models(target="demand")
+        assert loaded is not None
+        assert loaded.target == "demand"
+
+    def test_separate_files(self, tmp_path, monkeypatch):
+        import src.models.xgb_trainer as trainer_mod
+
+        monkeypatch.setattr(trainer_mod, "_CACHE_DIR", tmp_path)
+
+        sip, mip, demand = _make_series(90)
+        trained_sip = train_xgb_models(sip, mip, demand_series=demand, target="sip")
+        trained_dem = train_xgb_models(sip, mip, demand_series=demand, target="demand")
+
+        save_trained_models(trained_sip, target="sip")
+        save_trained_models(trained_dem, target="demand")
+
+        loaded_sip = load_trained_models(target="sip")
+        loaded_dem = load_trained_models(target="demand")
+
+        assert loaded_sip is not None
+        assert loaded_dem is not None
+        assert loaded_sip.target == "sip"
+        assert loaded_dem.target == "demand"
+        assert loaded_sip.training_timestamp != loaded_dem.training_timestamp

@@ -46,7 +46,9 @@ from src.models.rolling_backtest import (
 from src.models.xgb_forecaster import _build_features
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "xgb_models"
-_MODEL_FILE = _CACHE_DIR / "trained_xgb.joblib"
+
+def _model_file(target: str = "sip") -> Path:
+    return _CACHE_DIR / f"trained_xgb_{target}.joblib"
 
 GRID = {
     "n_estimators": [50, 100, 200],
@@ -66,6 +68,7 @@ REPRESENTATIVE_HORIZONS = [48, 48 * 3, 48 * 7, 48 * 14]
 
 @dataclass
 class TrainedXGBModels:
+    target: str = "sip"
     best_params: Dict[str, Dict[int, dict]] = field(default_factory=dict)
     best_scores: Dict[str, Dict[int, float]] = field(default_factory=dict)
     final_models: Dict[str, Dict[int, Any]] = field(default_factory=dict)
@@ -178,6 +181,7 @@ def train_xgb_models(
     sip_series: pd.Series,
     mip_series: pd.Series,
     demand_series: Optional[pd.Series] = None,
+    target: str = "sip",
     progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> TrainedXGBModels:
     """
@@ -187,6 +191,9 @@ def train_xgb_models(
       3. Run rolling backtest with tuned params
       4. Package everything into TrainedXGBModels
 
+    Parameters
+    ----------
+    target : "sip" or "demand" — which series to forecast.
     progress_callback(fraction, message) is called to update a progress bar.
     """
     if not _HAS_XGB:
@@ -196,8 +203,21 @@ def train_xgb_models(
     mip_values = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series is not None else None
 
+    if target == "demand":
+        if demand_values is None:
+            raise ValueError("demand_series required when target='demand'")
+        train_target = demand_values
+        train_mip = None
+        train_aux = sip_values
+    else:
+        train_target = sip_values
+        train_mip = mip_values
+        train_aux = demand_values
+
+    target_desc = "Demand" if target == "demand" else "SIP"
+
     param_combos = _generate_param_combos()
-    result = TrainedXGBModels(training_timestamp=time.time())
+    result = TrainedXGBModels(target=target, training_timestamp=time.time())
 
     lookbacks = list(ROLLING_LOOKBACKS.items())
     total_steps = len(lookbacks) * len(REPRESENTATIVE_HORIZONS) + 1
@@ -215,12 +235,12 @@ def train_xgb_models(
             if progress_callback:
                 progress_callback(
                     step_idx / total_steps,
-                    f"Grid search: {lb_label} lookback, {h_days}d horizon "
+                    f"Grid search ({target_desc}): {lb_label} lookback, {h_days}d horizon "
                     f"({len(param_combos)} combos)…",
                 )
 
             X, y, cmeans = _build_train_data(
-                sip_values, lb_sps, h_sps, mip_values, demand_values,
+                train_target, lb_sps, h_sps, train_mip, train_aux,
             )
             if X is None:
                 logger.info("Insufficient data for %s / %dd — skipping", lb_label, h_days)
@@ -243,7 +263,7 @@ def train_xgb_models(
     if progress_callback:
         progress_callback(
             step_idx / total_steps,
-            "Running rolling backtest with tuned params…",
+            f"Running rolling backtest ({target_desc}) with tuned params…",
         )
 
     best_global_params = _pick_global_best(result.best_params)
@@ -251,7 +271,7 @@ def train_xgb_models(
     errors, crossovers = run_rolling_backtest(
         sip_series, mip_series,
         method="xgb",
-        target="sip",
+        target=target,
         demand_series=demand_series,
         xgb_params=best_global_params,
     )
@@ -259,7 +279,7 @@ def train_xgb_models(
     result.backtest_crossovers = crossovers
 
     if progress_callback:
-        progress_callback(1.0, "Training complete.")
+        progress_callback(1.0, f"{target_desc} training complete.")
 
     return result
 
@@ -297,11 +317,24 @@ def forecast_forward(
 
     Returns {lookback_label: {horizon_days: predicted_value}}.
     Uses the closest trained horizon model for each requested day.
+    Automatically routes features based on trained.target.
     """
     if not _HAS_XGB:
         return {}
 
-    origin_idx = len(sip_values) - 1
+    target = getattr(trained, "target", "sip")
+    if target == "demand":
+        if demand_values is None:
+            return {}
+        fc_target = demand_values
+        fc_mip = None
+        fc_aux = sip_values
+    else:
+        fc_target = sip_values
+        fc_mip = mip_values
+        fc_aux = demand_values
+
+    origin_idx = len(fc_target) - 1
     result: Dict[str, Dict[int, float]] = {}
 
     for lb_label in trained.final_models:
@@ -316,7 +349,7 @@ def forecast_forward(
             model = trained.final_models[lb_label][closest_h]
             cmeans = trained.col_means[lb_label][closest_h]
 
-            feat = _build_features(sip_values, origin_idx, h_sps, mip_values, demand_values)
+            feat = _build_features(fc_target, origin_idx, h_sps, fc_mip, fc_aux)
             if feat is None:
                 continue
             feat = np.where(np.isnan(feat), cmeans, feat)
@@ -330,31 +363,33 @@ def forecast_forward(
 
 # ── Disk Persistence ─────────────────────────────────────────────────────
 
-def save_trained_models(trained: TrainedXGBModels) -> bool:
-    """Save to disk. Returns True on success."""
+def save_trained_models(trained: TrainedXGBModels, target: str = "sip") -> bool:
+    """Save to disk for the given target. Returns True on success."""
     if not _HAS_JOBLIB:
         logger.warning("joblib not installed — cannot save models to disk")
         return False
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump(trained, _MODEL_FILE)
-        logger.info("Saved trained XGB models to %s", _MODEL_FILE)
+        fpath = _model_file(target)
+        joblib.dump(trained, fpath)
+        logger.info("Saved trained XGB models (%s) to %s", target, fpath)
         return True
     except OSError as exc:
         logger.warning("Failed to save XGB models: %s", exc)
         return False
 
 
-def load_trained_models() -> Optional[TrainedXGBModels]:
-    """Load from disk. Returns None if not found or load fails."""
+def load_trained_models(target: str = "sip") -> Optional[TrainedXGBModels]:
+    """Load from disk for the given target. Returns None if not found."""
     if not _HAS_JOBLIB:
         return None
-    if not _MODEL_FILE.exists():
+    fpath = _model_file(target)
+    if not fpath.exists():
         return None
     try:
-        trained = joblib.load(_MODEL_FILE)
+        trained = joblib.load(fpath)
         if isinstance(trained, TrainedXGBModels):
-            logger.info("Loaded trained XGB models from %s", _MODEL_FILE)
+            logger.info("Loaded trained XGB models (%s) from %s", target, fpath)
             return trained
         return None
     except Exception as exc:
@@ -362,6 +397,6 @@ def load_trained_models() -> Optional[TrainedXGBModels]:
         return None
 
 
-def has_trained_models() -> bool:
-    """Quick check whether a saved model file exists on disk."""
-    return _MODEL_FILE.exists()
+def has_trained_models(target: str = "sip") -> bool:
+    """Quick check whether a saved model file exists on disk for the target."""
+    return _model_file(target).exists()

@@ -102,29 +102,32 @@ def _render_rolling_backtest_body() -> None:
 
     # ── XGBoost: Train / Show Results workflow ────────────────────────
     if method_key == "xgb":
+        target_desc = "Demand" if target_key == "demand" else "SIP (Price)"
+        ss_key = f"_xgb_trained_models_{target_key}"
+
         st.markdown("---")
-        st.subheader("XGBoost Model Training")
+        st.subheader(f"XGBoost Model Training — {target_desc}")
         st.caption(
-            "Train once with grid search, then view results anytime. "
-            "Models are saved to disk and persist across sessions."
+            f"Train a **{target_desc}** model with grid search, then view results anytime. "
+            "Price and Demand models are stored separately and persist across sessions."
         )
 
         col_train, col_show = st.columns(2)
         with col_train:
             train_btn = st.button(
-                "🏋️ Train XGBoost Model",
+                f"🏋️ Train {target_desc} Model",
                 use_container_width=True,
                 type="primary",
                 key="rb_xgb_train",
-                help="Grid search over 27 hyperparameter combos per lookback/horizon, "
-                     "then run rolling backtest with best params. Takes several minutes.",
+                help=f"Grid search over 27 hyperparameter combos for {target_desc} forecasting. "
+                     "Takes several minutes.",
             )
         with col_show:
             show_btn = st.button(
-                "📊 Show Results",
+                f"📊 Show {target_desc} Results",
                 use_container_width=True,
                 key="rb_xgb_show",
-                help="Load and display results from the last trained model.",
+                help=f"Load and display results from the last trained {target_desc} model.",
             )
 
         if train_btn:
@@ -150,13 +153,14 @@ def _render_rolling_backtest_body() -> None:
             trained = train_xgb_models(
                 sip_series, mip_series,
                 demand_series=demand_series,
+                target=target_key,
                 progress_callback=_progress,
             )
             progress_bar.empty()
             status_text.empty()
 
-            save_trained_models(trained)
-            st.session_state["_xgb_trained_models"] = trained
+            save_trained_models(trained, target=target_key)
+            st.session_state[ss_key] = trained
 
             _display_training_summary(trained)
 
@@ -165,26 +169,27 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
             st.success(
-                f"Training complete — {len(trained.backtest_errors)} backtest "
+                f"{target_desc} training complete — {len(trained.backtest_errors)} backtest "
                 f"configurations evaluated. Model saved to disk."
             )
 
         if show_btn:
-            trained = st.session_state.get("_xgb_trained_models")
+            trained = st.session_state.get(ss_key)
             if trained is None:
-                trained = load_trained_models()
+                trained = load_trained_models(target=target_key)
                 if trained is not None:
-                    st.session_state["_xgb_trained_models"] = trained
+                    st.session_state[ss_key] = trained
 
             if trained is None:
                 st.info(
-                    "No trained model found. Press **Train XGBoost Model** first."
+                    f"No trained {target_desc} model found. "
+                    f"Press **Train {target_desc} Model** first."
                 )
                 return
 
             import datetime as dt
             ts = dt.datetime.fromtimestamp(trained.training_timestamp)
-            st.caption(f"Loaded model trained at **{ts:%Y-%m-%d %H:%M}**")
+            st.caption(f"Loaded {target_desc} model trained at **{ts:%Y-%m-%d %H:%M}**")
             _display_training_summary(trained)
 
             rb_key_prefix = f"_rb_{target_key}_{method_key}"
@@ -563,16 +568,19 @@ def _display_training_summary(trained) -> None:
 
 
 def _render_forward_forecast() -> None:
-    """Show 14-day forward forecast from trained XGBoost models."""
-    trained = st.session_state.get("_xgb_trained_models")
-    if trained is None or not trained.final_models:
-        return
-
+    """Show 14-day forward forecast from trained XGBoost models (SIP and/or Demand)."""
     sip_df = st.session_state.get(SIP_DF)
     mip_df = st.session_state.get(MIP_DF)
     demand_df = st.session_state.get(DEMAND_DF)
 
     if sip_df is None or sip_df.empty or mip_df is None or mip_df.empty:
+        return
+
+    trained_sip = st.session_state.get("_xgb_trained_models_sip")
+    trained_demand = st.session_state.get("_xgb_trained_models_demand")
+
+    if (trained_sip is None or not trained_sip.final_models) and \
+       (trained_demand is None or not trained_demand.final_models):
         return
 
     from src.models.forecaster import build_aligned_series
@@ -585,21 +593,6 @@ def _render_forward_forecast() -> None:
     mip_values = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series is not None else None
 
-    forecasts = forecast_forward(
-        trained, sip_values, mip_values, demand_values, n_days=14,
-    )
-
-    if not forecasts:
-        return
-
-    st.markdown("---")
-    st.subheader("6. 14-Day Forward Forecast (XGBoost)")
-    st.caption(
-        "Each curve shows the model's point forecast from the latest data point, "
-        "using the trained model for each lookback window. Compare how different "
-        "lookback windows produce different forward views."
-    )
-
     last_date = sip_series.index[-1]
     lb_colours = {
         "1 day": COLOUR_PRIMARY,
@@ -608,45 +601,65 @@ def _render_forward_forecast() -> None:
         "30 days": COLOUR_SUCCESS,
     }
 
-    fig = go.Figure()
-    for lb_label, day_forecasts in forecasts.items():
-        if not day_forecasts:
-            continue
-        days = sorted(day_forecasts.keys())
-        dates = [last_date + pd.Timedelta(days=d) for d in days]
-        values = [day_forecasts[d] for d in days]
-        colour = lb_colours.get(lb_label, COLOUR_MUTED)
-
-        fig.add_trace(go.Scatter(
-            x=dates, y=values,
-            mode="lines+markers",
-            name=f"{lb_label} lookback",
-            line=dict(color=colour, width=2),
-            marker=dict(size=6),
-        ))
-
-    fig.update_layout(
-        template=PLOTLY_TEMPLATE,
-        title="XGBoost Forward Forecast — Next 14 Days",
-        xaxis_title="Date",
-        yaxis_title="Predicted SIP (£/MWh)",
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    st.markdown("---")
+    st.subheader("6. 14-Day Forward Forecast (XGBoost)")
+    st.caption(
+        "Point forecasts from the latest data point using trained models. "
+        "Price and Demand models are shown separately when available."
     )
-    st.plotly_chart(fig, use_container_width=True)
 
-    fc_rows = []
-    for lb_label, day_forecasts in forecasts.items():
-        for d in sorted(day_forecasts.keys()):
-            fc_rows.append({
-                "Lookback": lb_label,
-                "Day Ahead": d,
-                "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
-                "Forecast (£/MWh)": f"{day_forecasts[d]:.2f}",
-            })
-    if fc_rows:
-        with st.expander("Forward Forecast Data"):
-            st.dataframe(pd.DataFrame(fc_rows), use_container_width=True, hide_index=True)
+    for trained, label, unit, y_label in [
+        (trained_sip, "SIP (Price)", "£/MWh", "Predicted SIP (£/MWh)"),
+        (trained_demand, "Demand", "MW", "Predicted Demand (MW)"),
+    ]:
+        if trained is None or not trained.final_models:
+            continue
+
+        forecasts = forecast_forward(
+            trained, sip_values, mip_values, demand_values, n_days=14,
+        )
+        if not forecasts:
+            continue
+
+        fig = go.Figure()
+        for lb_label, day_forecasts in forecasts.items():
+            if not day_forecasts:
+                continue
+            days = sorted(day_forecasts.keys())
+            dates = [last_date + pd.Timedelta(days=d) for d in days]
+            values = [day_forecasts[d] for d in days]
+            colour = lb_colours.get(lb_label, COLOUR_MUTED)
+
+            fig.add_trace(go.Scatter(
+                x=dates, y=values,
+                mode="lines+markers",
+                name=f"{lb_label} lookback",
+                line=dict(color=colour, width=2),
+                marker=dict(size=6),
+            ))
+
+        fig.update_layout(
+            template=PLOTLY_TEMPLATE,
+            title=f"{label} Forward Forecast — Next 14 Days",
+            xaxis_title="Date",
+            yaxis_title=y_label,
+            height=500,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        fc_rows = []
+        for lb_label, day_forecasts in forecasts.items():
+            for d in sorted(day_forecasts.keys()):
+                fc_rows.append({
+                    "Lookback": lb_label,
+                    "Day Ahead": d,
+                    "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
+                    f"Forecast ({unit})": f"{day_forecasts[d]:.2f}",
+                })
+        if fc_rows:
+            with st.expander(f"{label} Forward Forecast Data"):
+                st.dataframe(pd.DataFrame(fc_rows), use_container_width=True, hide_index=True)
 
 
 def _render_combined_analysis() -> None:
