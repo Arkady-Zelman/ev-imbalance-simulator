@@ -48,6 +48,8 @@ class TestRunRollingBacktest:
         assert isinstance(e, RollingErrorRow)
         assert e.forecast_mae >= 0
         assert e.market_mae >= 0
+        assert e.forecast_mape >= 0
+        assert e.market_mape >= 0
         assert e.n_obs > 0
 
     def test_crossover_fields(self, long_series):

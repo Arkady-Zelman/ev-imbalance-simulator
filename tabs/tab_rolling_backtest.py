@@ -241,6 +241,46 @@ def _render_rolling_backtest_body() -> None:
     )
     st.plotly_chart(fig_err, use_container_width=True)
 
+    # MAPE chart
+    fig_mape = go.Figure()
+    for lb_label in ROLLING_LOOKBACKS:
+        lb_rows = sorted(
+            [e for e in errors if e.lookback_label == lb_label],
+            key=lambda e: e.horizon_days,
+        )
+        if not lb_rows:
+            continue
+
+        days = [e.horizon_days for e in lb_rows]
+        fc_mapes = [e.forecast_mape for e in lb_rows]
+        mkt_mapes = [e.market_mape for e in lb_rows]
+
+        colour = lb_colours.get(lb_label, COLOUR_MUTED)
+
+        fig_mape.add_trace(go.Scatter(
+            x=days, y=fc_mapes,
+            mode="lines+markers", name=f"Our Forecast ({lb_label})",
+            line=dict(color=colour, width=2),
+            marker=dict(size=6),
+        ))
+        fig_mape.add_trace(go.Scatter(
+            x=days, y=mkt_mapes,
+            mode="lines+markers", name=f"Market ({lb_label})",
+            line=dict(color=colour, width=1, dash="dash"),
+            marker=dict(size=4, symbol="x"),
+        ))
+
+    fig_mape.update_layout(
+        template=PLOTLY_TEMPLATE,
+        margin=dict(l=50, r=30, t=50, b=50),
+        title="MAPE by Forecast Horizon (days ahead)",
+        xaxis_title="Forecast Horizon (days)",
+        yaxis_title="MAPE (%)",
+        height=500,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_mape, use_container_width=True)
+
     # ══════════════════════════════════════════════════════════════════
     # Section 4: Alpha Decay Curves
     # ══════════════════════════════════════════════════════════════════
@@ -299,7 +339,10 @@ def _render_rolling_backtest_body() -> None:
             "Horizon": f"{e.horizon_days}d",
             "Forecast MAE": f"£{e.forecast_mae:.2f}",
             "Market MAE": f"£{e.market_mae:.2f}",
-            "Alpha": f"£{e.alpha_mae:+.2f}",
+            "Alpha (MAE)": f"£{e.alpha_mae:+.2f}",
+            "Forecast MAPE": f"{e.forecast_mape:.1f}%",
+            "Market MAPE": f"{e.market_mape:.1f}%",
+            "Alpha (MAPE)": f"{e.alpha_mape:+.1f}pp",
             "DM p-value": f"{e.dm_pvalue:.4f}",
             "Significant": sig,
             "N Obs": e.n_obs,

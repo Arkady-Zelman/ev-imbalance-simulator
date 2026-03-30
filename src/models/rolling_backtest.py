@@ -47,9 +47,12 @@ class RollingErrorRow:
     horizon_sps: int
     forecast_mae: float
     forecast_rmse: float
+    forecast_mape: float      # mean absolute percentage error (%)
     market_mae: float
     market_rmse: float
+    market_mape: float        # mean absolute percentage error (%)
     alpha_mae: float          # market_mae - forecast_mae
+    alpha_mape: float         # market_mape - forecast_mape (pp)
     dm_pvalue: float
     n_obs: int
 
@@ -100,6 +103,7 @@ def run_rolling_backtest(
 
             fc_errors_list = []
             mkt_errors_list = []
+            realised_list = []
 
             for idx in range(start_idx, end_idx, step):
                 if method == "ewma":
@@ -114,21 +118,28 @@ def run_rolling_backtest(
                 if h_sps not in fc or h_sps not in realised or h_sps not in market_fwd:
                     continue
 
-                fc_err = abs(fc[h_sps] - realised[h_sps])
-                mkt_err = abs(market_fwd[h_sps] - realised[h_sps])
+                r = realised[h_sps]
+                fc_err = abs(fc[h_sps] - r)
+                mkt_err = abs(market_fwd[h_sps] - r)
                 fc_errors_list.append(fc_err)
                 mkt_errors_list.append(mkt_err)
+                realised_list.append(r)
 
             if len(fc_errors_list) < 5:
                 continue
 
             fc_arr = np.array(fc_errors_list)
             mkt_arr = np.array(mkt_errors_list)
+            real_arr = np.array(realised_list)
 
             forecast_mae = float(np.mean(fc_arr))
             forecast_rmse = float(np.sqrt(np.mean(fc_arr ** 2)))
             market_mae = float(np.mean(mkt_arr))
             market_rmse = float(np.sqrt(np.mean(mkt_arr ** 2)))
+
+            safe_real = np.where(np.abs(real_arr) < 1e-6, 1e-6, real_arr)
+            forecast_mape = float(np.mean(fc_arr / np.abs(safe_real)) * 100)
+            market_mape = float(np.mean(mkt_arr / np.abs(safe_real)) * 100)
 
             _, dm_p = diebold_mariano(fc_arr, mkt_arr, h=max(1, h_days), power=2)
 
@@ -139,9 +150,12 @@ def run_rolling_backtest(
                 horizon_sps=h_sps,
                 forecast_mae=forecast_mae,
                 forecast_rmse=forecast_rmse,
+                forecast_mape=forecast_mape,
                 market_mae=market_mae,
                 market_rmse=market_rmse,
+                market_mape=market_mape,
                 alpha_mae=market_mae - forecast_mae,
+                alpha_mape=market_mape - forecast_mape,
                 dm_pvalue=dm_p,
                 n_obs=len(fc_errors_list),
             ))
