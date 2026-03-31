@@ -1,0 +1,536 @@
+"""
+Capacity Allocation Optimizer tab — translates three forecast models
+(Price/SIP, Wholesale/MIP, Demand) plus Monte Carlo fleet availability
+into actionable trading recommendations: how much to commit to wholesale
+vs. balancing markets, and whether to overbook or underbook.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from src.config import (
+    COLOUR_DANGER,
+    COLOUR_MUTED,
+    COLOUR_PRIMARY,
+    COLOUR_SUCCESS,
+    COLOUR_WARNING,
+    NUM_SETTLEMENT_PERIODS,
+    PLOTLY_TEMPLATE,
+    SP_LABELS,
+)
+from src.models.allocation_optimizer import AllocationResult, optimize_allocation
+from src.models.forecaster import build_aligned_series
+from src.models.xgb_trainer import (
+    forecast_forward,
+    has_trained_models,
+    load_trained_models,
+)
+from src.session_keys import DEMAND_DF, MIP_DF, RESULT, SIP_DF
+
+
+def render(has_results: bool) -> None:
+    st.header("Capacity Allocation Optimizer")
+    st.caption(
+        "Combines SIP, wholesale (MIP), and demand forecasts with Monte Carlo "
+        "fleet availability to recommend the optimal wholesale vs. balancing "
+        "market split per settlement period — including overbook/underbook guidance."
+    )
+
+    if not has_results:
+        st.info("Run a simulation first to use this tool.")
+        return
+
+    result = st.session_state.get(RESULT)
+    if result is None:
+        st.warning("No simulation results available.")
+        return
+
+    sip_df = st.session_state.get(SIP_DF)
+    mip_df = st.session_state.get(MIP_DF)
+    demand_df = st.session_state.get(DEMAND_DF)
+
+    if sip_df is None or sip_df.empty or mip_df is None or mip_df.empty:
+        st.warning("SIP and MIP data are both required. Run a simulation first.")
+        return
+
+    _render_allocation_body(result)
+
+
+@st.fragment
+def _render_allocation_body(result) -> None:
+    sip_df = st.session_state[SIP_DF]
+    mip_df = st.session_state[MIP_DF]
+    demand_df = st.session_state.get(DEMAND_DF)
+    delivered_mw = result.delivered_mw  # (n_runs, 48)
+
+    # ── Load or prompt for trained models ─────────────────────────────
+    trained_sip = _ensure_model("sip", "Price (SIP)")
+    trained_mip = _ensure_model("mip", "Wholesale (MIP)")
+
+    if trained_sip is None and trained_mip is None:
+        st.error(
+            "At least one trained model (Price or Wholesale) is required. "
+            "Go to the **Rolling Backtest** tab and train an XGBoost model first."
+        )
+        return
+
+    # ── Build aligned series and forecasts ────────────────────────────
+    sip_series, mip_series, demand_series = build_aligned_series(
+        sip_df, mip_df, demand_df=demand_df,
+    )
+    sip_values = sip_series.values.astype(float)
+    mip_values = mip_series.values.astype(float)
+    demand_values = demand_series.values.astype(float) if demand_series is not None else None
+
+    st.markdown("---")
+    st.subheader("1. Forecast Inputs")
+
+    sip_fc_48 = _build_48sp_forecast(trained_sip, sip_values, mip_values, demand_values, "SIP")
+    mip_fc_48 = _build_48sp_forecast(trained_mip, sip_values, mip_values, demand_values, "MIP")
+
+    if sip_fc_48 is None and mip_fc_48 is None:
+        st.error("Could not generate any forward forecasts. Train models first.")
+        return
+
+    if sip_fc_48 is None:
+        sip_fc_48 = sip_values[-48:].copy()
+        st.caption("No SIP model — using last observed day as SIP forecast.")
+    if mip_fc_48 is None:
+        mip_fc_48 = mip_values[-48:].copy()
+        st.caption("No MIP model — using last observed day as MIP forecast.")
+
+    _render_forecast_summary(sip_fc_48, mip_fc_48, trained_sip, trained_mip)
+
+    # ── Risk tolerance slider ─────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("2. Risk Tolerance")
+    risk_tolerance = st.slider(
+        "Risk Tolerance",
+        min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+        key="alloc_risk",
+        help="0 = pure expected-revenue maximisation (risk-neutral). "
+             "1 = maximise risk-adjusted return (penalise tail losses via ES).",
+    )
+
+    # ── Run optimizer ─────────────────────────────────────────────────
+    run_btn = st.button(
+        "⚡ Optimise Allocation",
+        use_container_width=True,
+        type="primary",
+        key="alloc_run",
+    )
+
+    alloc_key = "_allocation_result"
+
+    if run_btn:
+        with st.spinner("Optimising wholesale vs. balancing allocation across 48 SPs…"):
+            alloc = optimize_allocation(
+                sip_forecasts=sip_fc_48,
+                mip_forecasts=mip_fc_48,
+                delivered_mw=delivered_mw,
+                risk_tolerance=risk_tolerance,
+            )
+        st.session_state[alloc_key] = alloc
+        st.success("Allocation optimisation complete.")
+
+    alloc: AllocationResult | None = st.session_state.get(alloc_key)
+    if alloc is None:
+        st.info("Click **Optimise Allocation** above to generate recommendations.")
+        return
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section 3: Optimal Allocation Profile
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.subheader("3. Optimal Allocation Profile")
+    st.caption(
+        "Stacked area chart showing the recommended MW to commit to wholesale "
+        "vs. balancing markets per settlement period."
+    )
+
+    sp_labels = SP_LABELS[:NUM_SETTLEMENT_PERIODS]
+    wholesale_mw = [a.wholesale_mw for a in alloc.sp_allocations]
+    balancing_mw = [a.balancing_mw for a in alloc.sp_allocations]
+    expected_del = [a.expected_delivered for a in alloc.sp_allocations]
+
+    fig_alloc = go.Figure()
+    fig_alloc.add_trace(go.Scatter(
+        x=sp_labels, y=wholesale_mw,
+        mode="lines", name="Wholesale (MIP)",
+        line=dict(width=0), fillcolor="rgba(52, 152, 219, 0.5)",
+        stackgroup="alloc",
+    ))
+    fig_alloc.add_trace(go.Scatter(
+        x=sp_labels, y=balancing_mw,
+        mode="lines", name="Balancing (SIP)",
+        line=dict(width=0), fillcolor="rgba(46, 204, 113, 0.5)",
+        stackgroup="alloc",
+    ))
+    fig_alloc.add_trace(go.Scatter(
+        x=sp_labels, y=expected_del,
+        mode="lines", name="Expected Delivery (P50)",
+        line=dict(color="white", width=2, dash="dash"),
+    ))
+    fig_alloc.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title="Wholesale vs. Balancing Allocation by Settlement Period",
+        xaxis_title="Settlement Period",
+        yaxis_title="MW",
+        height=500,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_alloc, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section 4: Overbook / Underbook Recommendation
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.subheader("4. Overbook / Underbook Recommendation")
+
+    strategies = [a.strategy for a in alloc.sp_allocations]
+    n_over = strategies.count("overbook")
+    n_under = strategies.count("underbook")
+    n_match = strategies.count("match")
+
+    col1, col2, col3, col4 = st.columns(4)
+    total_committed = sum(a.total_committed for a in alloc.sp_allocations)
+    total_expected = sum(a.expected_delivered for a in alloc.sp_allocations)
+    portfolio_ob = total_committed / total_expected if total_expected > 0 else 1.0
+
+    col1.metric("Portfolio Overbook Ratio", f"{portfolio_ob:.2%}")
+    col2.metric("Overbook SPs", f"{n_over} / {NUM_SETTLEMENT_PERIODS}")
+    col3.metric("Match SPs", f"{n_match} / {NUM_SETTLEMENT_PERIODS}")
+    col4.metric("Underbook SPs", f"{n_under} / {NUM_SETTLEMENT_PERIODS}")
+
+    ob_colour_map = {
+        "overbook": COLOUR_DANGER,
+        "match": COLOUR_WARNING,
+        "underbook": COLOUR_SUCCESS,
+    }
+
+    fig_ob = go.Figure()
+    fig_ob.add_trace(go.Bar(
+        x=sp_labels,
+        y=[a.overbook_ratio for a in alloc.sp_allocations],
+        marker_color=[ob_colour_map.get(a.strategy, COLOUR_MUTED) for a in alloc.sp_allocations],
+        name="Overbook Ratio",
+        hovertext=[
+            f"SP {a.sp+1}: {a.strategy}<br>"
+            f"Wholesale: {a.wholesale_mw:.1f} MW<br>"
+            f"Balancing: {a.balancing_mw:.1f} MW<br>"
+            f"Committed: {a.total_committed:.1f} MW<br>"
+            f"Expected: {a.expected_delivered:.1f} MW"
+            for a in alloc.sp_allocations
+        ],
+    ))
+    fig_ob.add_hline(y=1.0, line_color="white", line_width=1, line_dash="dash",
+                     annotation_text="Match")
+    fig_ob.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title="Overbook Ratio per Settlement Period",
+        xaxis_title="Settlement Period",
+        yaxis_title="Overbook Ratio (>1 = overbook)",
+        height=400,
+    )
+    st.plotly_chart(fig_ob, use_container_width=True)
+
+    with st.expander("Detailed SP Allocation Table"):
+        detail_rows = []
+        for a in alloc.sp_allocations:
+            detail_rows.append({
+                "SP": sp_labels[a.sp],
+                "Wholesale MW": f"{a.wholesale_mw:.2f}",
+                "Balancing MW": f"{a.balancing_mw:.2f}",
+                "Total Committed": f"{a.total_committed:.2f}",
+                "Expected Delivered": f"{a.expected_delivered:.2f}",
+                "Overbook Ratio": f"{a.overbook_ratio:.2%}",
+                "Strategy": a.strategy,
+                "E[Revenue] (£)": f"£{a.expected_revenue:.0f}",
+                "ES Revenue (£)": f"£{a.es_revenue:.0f}",
+            })
+        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section 5: Strategy Comparison
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.subheader("5. Strategy Comparison")
+    st.caption(
+        "Compares three strategies across the Monte Carlo delivery distribution: "
+        "commit everything wholesale, commit everything to balancing, or use the "
+        "optimised split."
+    )
+
+    strats = [alloc.pure_wholesale_strategy, alloc.pure_balancing_strategy, alloc.optimal_strategy]
+    strat_colours = [COLOUR_PRIMARY, COLOUR_SUCCESS, COLOUR_WARNING]
+
+    comp_rows = []
+    for s in strats:
+        comp_rows.append({
+            "Strategy": s.name,
+            "E[Daily P&L]": f"£{s.mean_pnl:,.0f}",
+            "Median P&L": f"£{s.median_pnl:,.0f}",
+            "Std P&L": f"£{s.std_pnl:,.0f}",
+            "ES (5%)": f"£{s.es_5:,.0f}",
+            "Max Loss": f"£{s.max_loss:,.0f}",
+            "Max Gain": f"£{s.max_gain:,.0f}",
+            "Reward/Risk": f"{s.reward_to_risk:.3f}",
+        })
+    st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+    fig_pnl = go.Figure()
+    for s, colour in zip(strats, strat_colours):
+        fig_pnl.add_trace(go.Histogram(
+            x=s.daily_pnl,
+            name=s.name,
+            marker_color=colour,
+            opacity=0.6,
+            nbinsx=50,
+        ))
+    fig_pnl.update_layout(
+        template=PLOTLY_TEMPLATE,
+        barmode="overlay",
+        title="Daily P&L Distribution by Strategy",
+        xaxis_title="Daily P&L (£)",
+        yaxis_title="Count",
+        height=450,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_pnl, use_container_width=True)
+
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        x=[s.name for s in strats],
+        y=[s.mean_pnl for s in strats],
+        marker_color=strat_colours,
+        text=[f"£{s.mean_pnl:,.0f}" for s in strats],
+        textposition="auto",
+    ))
+    fig_bar.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title="Expected Daily Revenue by Strategy",
+        yaxis_title="E[Daily P&L] (£)",
+        height=400,
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section 6: Sensitivity — risk tolerance
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.subheader("6. Risk Tolerance Sensitivity")
+    st.caption(
+        "Shows how the portfolio overbook ratio and expected daily revenue "
+        "change as risk tolerance varies from 0 (risk-neutral) to 1 (risk-averse)."
+    )
+
+    sens_key = "_alloc_sensitivity"
+    if st.button("📈 Run Sensitivity Sweep", key="alloc_sens_btn"):
+        sip_fc = st.session_state.get("_alloc_sip_fc_48")
+        mip_fc = st.session_state.get("_alloc_mip_fc_48")
+        delivered = result.delivered_mw
+        if sip_fc is not None and mip_fc is not None:
+            with st.spinner("Running sensitivity sweep across risk tolerances…"):
+                sweep_results = []
+                for rt in np.arange(0.0, 1.05, 0.1):
+                    a = optimize_allocation(sip_fc, mip_fc, delivered, risk_tolerance=float(rt))
+                    total_c = sum(s.total_committed for s in a.sp_allocations)
+                    total_e = sum(s.expected_delivered for s in a.sp_allocations)
+                    sweep_results.append({
+                        "risk_tolerance": float(rt),
+                        "ob_ratio": total_c / total_e if total_e > 0 else 1.0,
+                        "expected_rev": a.optimal_strategy.mean_pnl,
+                        "es_5": a.optimal_strategy.es_5,
+                    })
+                st.session_state[sens_key] = sweep_results
+
+    sweep = st.session_state.get(sens_key)
+    if sweep:
+        sweep_df = pd.DataFrame(sweep)
+        from plotly.subplots import make_subplots
+        fig_sens = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_sens.add_trace(go.Scatter(
+            x=sweep_df["risk_tolerance"], y=sweep_df["ob_ratio"],
+            mode="lines+markers", name="Overbook Ratio",
+            line=dict(color=COLOUR_PRIMARY, width=2),
+        ), secondary_y=False)
+        fig_sens.add_trace(go.Scatter(
+            x=sweep_df["risk_tolerance"], y=sweep_df["expected_rev"],
+            mode="lines+markers", name="E[Daily Revenue]",
+            line=dict(color=COLOUR_SUCCESS, width=2),
+        ), secondary_y=True)
+        fig_sens.add_trace(go.Scatter(
+            x=sweep_df["risk_tolerance"], y=sweep_df["es_5"],
+            mode="lines+markers", name="ES (5%)",
+            line=dict(color=COLOUR_DANGER, width=2, dash="dash"),
+        ), secondary_y=True)
+        fig_sens.update_layout(
+            template=PLOTLY_TEMPLATE,
+            title="Allocation Sensitivity to Risk Tolerance",
+            xaxis_title="Risk Tolerance",
+            height=450,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        fig_sens.update_yaxes(title_text="Overbook Ratio", secondary_y=False)
+        fig_sens.update_yaxes(title_text="Revenue (£)", secondary_y=True)
+        st.plotly_chart(fig_sens, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Methodology
+    # ══════════════════════════════════════════════════════════════════
+    with st.expander("Methodology & Assumptions"):
+        st.markdown("""
+**What this tool does:**
+- For each of the 48 settlement periods, the optimizer decides how many MW to
+  commit to the **wholesale market** (sold at MIP) vs. the **balancing mechanism**
+  (valued at SIP when dispatched).
+- The optimizer uses the Monte Carlo fleet delivery distribution to account for
+  delivery uncertainty — shortfalls on wholesale commitments incur imbalance costs.
+
+**Revenue model per SP (per MC run):**
+- `wholesale_rev = W × 0.5h × MIP_forecast`
+- `bm_dispatched = min(B, max(0, delivered − W))`
+- `bm_rev = bm_dispatched × 0.5h × SIP_forecast`
+- `shortfall = max(0, W − delivered)`
+- `shortfall_cost = shortfall × 0.5h × |SIP_forecast|`
+- `net = wholesale_rev + bm_rev − shortfall_cost`
+
+**Optimisation:**
+- Grid search over wholesale commitment W from 0 to P99 of delivered MW.
+- Balancing reservation B = max(0, P50_delivered − W).
+- Score = (1−λ) × E[revenue] + λ × ES₅(revenue), where λ is risk tolerance.
+- λ=0 maximises expected revenue (risk-neutral); λ=1 maximises tail performance.
+
+**Overbook / Underbook:**
+- If total committed > expected delivery → **overbook** (aggressive, higher revenue,
+  higher shortfall risk).
+- If total committed < expected delivery → **underbook** (conservative, lower revenue,
+  lower shortfall risk).
+- The optimal ratio depends on the SIP/MIP spread and delivery uncertainty.
+
+**Key assumption:**
+- MIP (Market Index Price) is used as the wholesale price proxy. True DA auction
+  prices (EPEX/N2EX) are not freely available on the ELEXON no-key API.
+""")
+
+
+def _ensure_model(target: str, label: str):
+    """Load model from session or disk."""
+    ss_key = f"_xgb_trained_models_{target}"
+    trained = st.session_state.get(ss_key)
+    if trained is None:
+        trained = load_trained_models(target=target)
+        if trained is not None:
+            st.session_state[ss_key] = trained
+    if trained is not None and trained.final_models:
+        ts = dt.datetime.fromtimestamp(trained.training_timestamp)
+        st.caption(f"{label} model: trained **{ts:%Y-%m-%d %H:%M}**")
+    else:
+        st.caption(f"{label} model: not yet trained")
+        trained = None
+    return trained
+
+
+def _build_48sp_forecast(
+    trained, sip_values, mip_values, demand_values, target_label: str,
+) -> np.ndarray | None:
+    """
+    Build a 48-SP (one day) forecast from a trained XGBoost model.
+    Uses the day-1 forward forecast and repeats it across all 48 SPs.
+    Falls back to last observed day if model is not available.
+    """
+    if trained is None:
+        return None
+
+    forecasts = forecast_forward(
+        trained, sip_values, mip_values, demand_values, n_days=1,
+    )
+    if not forecasts:
+        return None
+
+    best_lb = max(forecasts.keys(), key=lambda k: len(forecasts[k]))
+    day_fc = forecasts[best_lb]
+    if 1 not in day_fc:
+        return None
+
+    fc_value = day_fc[1]
+    fc_48 = np.full(NUM_SETTLEMENT_PERIODS, fc_value)
+
+    target_key = "sip" if target_label == "SIP" else ("mip" if target_label == "MIP" else "demand")
+    target = getattr(trained, "target", target_key)
+
+    if target == "sip":
+        last_day_shape = sip_values[-48:]
+    elif target == "mip":
+        last_day_shape = mip_values[-48:]
+    elif target == "demand":
+        last_day_shape = demand_values[-48:] if demand_values is not None else None
+    else:
+        last_day_shape = None
+
+    if last_day_shape is not None and len(last_day_shape) == 48:
+        daily_mean = np.mean(last_day_shape)
+        if abs(daily_mean) > 1e-6:
+            shape = last_day_shape / daily_mean
+            fc_48 = fc_value * shape
+
+    ss_key = f"_alloc_{target_label.lower()}_fc_48"
+    st.session_state[ss_key] = fc_48
+    return fc_48
+
+
+def _render_forecast_summary(
+    sip_fc: np.ndarray,
+    mip_fc: np.ndarray,
+    trained_sip,
+    trained_mip,
+) -> None:
+    """Show the 48-SP forecast inputs used for optimisation."""
+    sp_labels = SP_LABELS[:NUM_SETTLEMENT_PERIODS]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=sp_labels, y=sip_fc,
+        mode="lines", name="SIP Forecast",
+        line=dict(color=COLOUR_PRIMARY, width=2),
+    ))
+    fig.add_trace(go.Scatter(
+        x=sp_labels, y=mip_fc,
+        mode="lines", name="MIP Forecast",
+        line=dict(color=COLOUR_WARNING, width=2),
+    ))
+
+    spread = sip_fc - mip_fc
+    fig.add_trace(go.Bar(
+        x=sp_labels, y=spread,
+        name="SIP − MIP Spread",
+        marker_color=[COLOUR_SUCCESS if s > 0 else COLOUR_DANGER for s in spread],
+        opacity=0.3,
+    ))
+
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title="Forecast Inputs: SIP vs. MIP per Settlement Period",
+        xaxis_title="Settlement Period",
+        yaxis_title="£/MWh",
+        height=450,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Mean SIP Forecast", f"£{np.mean(sip_fc):.2f}/MWh")
+    col2.metric("Mean MIP Forecast", f"£{np.mean(mip_fc):.2f}/MWh")
+    mean_spread = float(np.mean(spread))
+    col3.metric(
+        "Mean Spread (SIP − MIP)",
+        f"£{mean_spread:.2f}/MWh",
+        delta=f"{'Favour BM' if mean_spread > 0 else 'Favour Wholesale'}",
+        delta_color="normal" if mean_spread > 0 else "inverse",
+    )

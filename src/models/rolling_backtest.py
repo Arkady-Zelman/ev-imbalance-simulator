@@ -105,6 +105,9 @@ def run_rolling_backtest(
             return [], []
         target_values = demand_values
         benchmark_values = demand_values
+    elif target == "mip":
+        target_values = mip_values
+        benchmark_values = mip_values
     else:
         target_values = sip_values
         benchmark_values = mip_values
@@ -129,12 +132,23 @@ def run_rolling_backtest(
 
             for idx in range(start_idx, end_idx, step):
                 if method == "xgb":
-                    from src.models.xgb_forecaster import _xgb_demand_forecast, _xgb_forecast
+                    from src.models.xgb_forecaster import (
+                        _xgb_demand_forecast,
+                        _xgb_forecast,
+                        _xgb_mip_forecast,
+                    )
 
                     if target == "demand":
                         fc = _xgb_demand_forecast(
                             demand_values, idx, lb_sps, [h_sps],  # type: ignore[arg-type]
                             sip_values=sip_values,
+                            xgb_params=xgb_params,
+                        )
+                    elif target == "mip":
+                        fc = _xgb_mip_forecast(
+                            mip_values, idx, lb_sps, [h_sps],
+                            sip_values=sip_values,
+                            demand_values=demand_values,
                             xgb_params=xgb_params,
                         )
                     else:

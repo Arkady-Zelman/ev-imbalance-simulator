@@ -251,3 +251,33 @@ def _xgb_demand_forecast(
         demand_values=sip_values,
         xgb_params=xgb_params,
     )
+
+
+def _xgb_mip_forecast(
+    mip_values: np.ndarray,
+    origin_idx: int,
+    lookback_sps: int,
+    horizons: List[int],
+    sip_values: Optional[np.ndarray] = None,
+    demand_values: Optional[np.ndarray] = None,
+    xgb_params: Optional[Dict[str, object]] = None,
+) -> Dict[int, float]:
+    """
+    XGBoost wholesale (MIP) forecast: trains one model per horizon on the
+    lookback window using MIP as target and SIP + demand as auxiliary features.
+    """
+    if not _HAS_XGB:
+        logger.warning("xgboost not installed — falling back to TOD mean for MIP")
+        from src.models.forecaster import _tod_mean_forecast
+
+        return _tod_mean_forecast(mip_values, origin_idx, lookback_sps, horizons)
+
+    return _xgb_forecast(
+        sip_values=mip_values,
+        origin_idx=origin_idx,
+        lookback_sps=lookback_sps,
+        horizons=horizons,
+        mip_values=None,
+        demand_values=sip_values if sip_values is not None else demand_values,
+        xgb_params=xgb_params,
+    )

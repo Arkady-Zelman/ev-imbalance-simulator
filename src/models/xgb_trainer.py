@@ -252,7 +252,7 @@ def train_xgb_models(
 
     Parameters
     ----------
-    target : "sip" or "demand" — which series to forecast.
+    target : "sip", "demand", or "mip" — which series to forecast.
     progress_callback(fraction, message) is called to update a progress bar.
     param_search_mode : "grid" uses a 27-combo sweep on n_estimators, max_depth,
         and learning_rate with other params at GRID medians; "random" draws
@@ -277,12 +277,16 @@ def train_xgb_models(
         train_target = demand_values
         train_mip = None
         train_aux = sip_values
+    elif target == "mip":
+        train_target = mip_values
+        train_mip = None
+        train_aux = sip_values if sip_values is not None else demand_values
     else:
         train_target = sip_values
         train_mip = mip_values
         train_aux = demand_values
 
-    target_desc = "Demand" if target == "demand" else "SIP"
+    target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target, "SIP")
 
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
 
@@ -391,6 +395,12 @@ def forecast_forward(
         fc_target = demand_values
         fc_mip = None
         fc_aux = sip_values
+    elif target == "mip":
+        if mip_values is None:
+            return {}
+        fc_target = mip_values
+        fc_mip = None
+        fc_aux = sip_values if sip_values is not None else demand_values
     else:
         fc_target = sip_values
         fc_mip = mip_values

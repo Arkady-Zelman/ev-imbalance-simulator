@@ -448,6 +448,7 @@ from tabs.tab_historical_sip import render as render_sip_explorer
 from tabs.tab_data_sources import render as render_data_sources
 from tabs.tab_backtesting import render as render_backtesting
 from tabs.tab_rolling_backtest import render as render_rolling_bt
+from tabs.tab_allocation import render as render_allocation
 
 tabs = st.tabs([
     "📊 Executive Summary",
@@ -459,6 +460,7 @@ tabs = st.tabs([
     "📈 Historical SIP Explorer",
     "🔮 Forecast Backtesting",
     "📉 Rolling Backtest",
+    "⚖️ Allocation Optimizer",
     "📚 Data Sources & Methodology",
 ])
 
@@ -483,4 +485,6 @@ with tabs[7]:
 with tabs[8]:
     render_rolling_bt(has_results)
 with tabs[9]:
+    render_allocation(has_results)
+with tabs[10]:
     render_data_sources()

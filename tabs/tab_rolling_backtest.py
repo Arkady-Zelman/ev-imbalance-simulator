@@ -73,13 +73,20 @@ def _render_rolling_backtest_body() -> None:
     st.subheader("Configuration")
     col1, col2, col3 = st.columns(3)
     with col1:
+        target_options = ["Price (SIP)", "Wholesale (MIP)"]
+        if has_demand:
+            target_options.append("Demand")
         target_label = st.radio(
             "Forecast target",
-            ["Price", "Demand"] if has_demand else ["Price"],
+            target_options,
             horizontal=True,
             key="rb_target",
         )
-        target_key = "demand" if target_label == "Demand" else "sip"
+        target_key = {
+            "Price (SIP)": "sip",
+            "Wholesale (MIP)": "mip",
+            "Demand": "demand",
+        }[target_label]
     with col2:
         method_options = ["TOD Mean", "EWMA", "XGBoost", "NeuralProphet"]
         method = st.radio(
@@ -107,7 +114,7 @@ def _render_rolling_backtest_body() -> None:
 
     # ── XGBoost: Train / Show Results workflow ────────────────────────
     if method_key == "xgb":
-        target_desc = "Demand" if target_key == "demand" else "Price"
+        target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
         ss_key = f"_xgb_trained_models_{target_key}"
 
         st.markdown("---")
@@ -221,7 +228,7 @@ def _render_rolling_backtest_body() -> None:
 
     else:
         # ── TOD Mean / EWMA / NeuralProphet: standard single-button flow
-        target_desc = "Demand" if target_key == "demand" else "Price"
+        target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
         run_btn = st.button(
             f"🔬 Run {target_desc} Rolling Backtest ({method})",
             use_container_width=True,
@@ -277,6 +284,7 @@ def _render_rolling_backtest_body() -> None:
 
     is_demand = rb_key_prefix and "_demand_" in rb_key_prefix
     unit = "MW" if is_demand else "£/MWh"
+    is_mip = rb_key_prefix and "_mip_" in rb_key_prefix
 
     if not errors:
         st.warning("No results — insufficient data for any configuration.")
@@ -565,6 +573,13 @@ def _render_rolling_backtest_body() -> None:
   (how well does a simple seasonal average predict demand).
 - Demand is smoother than SIP, so baseline models perform better —
   XGBoost/NeuralProphet add value by capturing weather/calendar effects.
+
+**Wholesale (MIP) target:**
+- MIP (Market Index Price) is the GB wholesale reference price derived from
+  power exchange trades — the best available proxy for the day-ahead wholesale curve.
+- When forecasting MIP, SIP and demand serve as auxiliary features.
+- The benchmark is the TOD-mean of MIP itself.
+- Useful for identifying wholesale vs. balancing market price spreads.
 """)
 
     # ══════════════════════════════════════════════════════════════════
@@ -608,10 +623,14 @@ def _render_forward_forecast() -> None:
         return
 
     trained_sip = st.session_state.get("_xgb_trained_models_sip")
+    trained_mip = st.session_state.get("_xgb_trained_models_mip")
     trained_demand = st.session_state.get("_xgb_trained_models_demand")
 
-    if (trained_sip is None or not trained_sip.final_models) and \
-       (trained_demand is None or not trained_demand.final_models):
+    has_any = any(
+        t is not None and t.final_models
+        for t in [trained_sip, trained_mip, trained_demand]
+    )
+    if not has_any:
         return
 
     from src.models.forecaster import build_aligned_series
@@ -640,7 +659,8 @@ def _render_forward_forecast() -> None:
     )
 
     for trained, label, unit, y_label in [
-        (trained_sip, "Price", "£/MWh", "Predicted Price (£/MWh)"),
+        (trained_sip, "Price (SIP)", "£/MWh", "Predicted SIP (£/MWh)"),
+        (trained_mip, "Wholesale (MIP)", "£/MWh", "Predicted MIP (£/MWh)"),
         (trained_demand, "Demand", "MW", "Predicted Demand (MW)"),
     ]:
         if trained is None or not trained.final_models:
@@ -694,61 +714,66 @@ def _render_forward_forecast() -> None:
 
 
 def _render_combined_analysis() -> None:
-    """Show joint SIP + Demand alpha when both backtests have been run."""
+    """Show joint SIP + MIP + Demand alpha when multiple backtests have been run."""
     sip_keys = [k for k in st.session_state if k.startswith("_rb_sip_") and k.endswith("_errors")]
+    mip_keys = [k for k in st.session_state if k.startswith("_rb_mip_") and k.endswith("_errors")]
     demand_keys = [k for k in st.session_state if k.startswith("_rb_demand_") and k.endswith("_errors")]
 
-    if not sip_keys or not demand_keys:
+    available = {}
+    if sip_keys:
+        available["Price (SIP)"] = (sip_keys[-1], COLOUR_PRIMARY)
+    if mip_keys:
+        available["Wholesale (MIP)"] = (mip_keys[-1], COLOUR_WARNING)
+    if demand_keys:
+        available["Demand"] = (demand_keys[-1], COLOUR_SUCCESS)
+
+    if len(available) < 2:
         return
 
     st.markdown("---")
-    st.subheader("7. Combined Price + Demand Alpha Analysis")
+    st.subheader("7. Combined Alpha Analysis")
     st.caption(
-        "When both a Price and Demand rolling backtest have been run, this section "
-        "shows where you have forecast alpha on **both** axes simultaneously — "
+        "When multiple forecast targets have been backtested, this section "
+        "shows where you have forecast alpha on **multiple** axes simultaneously — "
         "essential for capacity allocation decisions."
     )
 
-    sip_errors = st.session_state[sip_keys[-1]]
-    demand_errors = st.session_state[demand_keys[-1]]
-
-    sip_method = sip_keys[-1].replace("_rb_sip_", "").replace("_errors", "")
-    demand_method = demand_keys[-1].replace("_rb_demand_", "").replace("_errors", "")
-
     best_lb = "30 days"
 
-    sip_by_h = {e.horizon_days: e.alpha_mae for e in sip_errors if e.lookback_label == best_lb}
-    dem_by_h = {e.horizon_days: e.alpha_mae for e in demand_errors if e.lookback_label == best_lb}
+    alpha_by_target: dict[str, dict[int, float]] = {}
+    methods: dict[str, str] = {}
+    for label, (key, _colour) in available.items():
+        errors = st.session_state[key]
+        short_key = key.split("_rb_")[1].replace("_errors", "")
+        parts = short_key.split("_", 1)
+        methods[label] = parts[1] if len(parts) > 1 else parts[0]
 
-    if not sip_by_h and not dem_by_h:
-        for lb in ["15 days", "1 day"]:
-            sip_by_h = {e.horizon_days: e.alpha_mae for e in sip_errors if e.lookback_label == lb}
-            dem_by_h = {e.horizon_days: e.alpha_mae for e in demand_errors if e.lookback_label == lb}
-            if sip_by_h or dem_by_h:
-                best_lb = lb
-                break
+        by_h = {e.horizon_days: e.alpha_mae for e in errors if e.lookback_label == best_lb}
+        if not by_h:
+            for lb in ["15 days", "5 days", "1 day"]:
+                by_h = {e.horizon_days: e.alpha_mae for e in errors if e.lookback_label == lb}
+                if by_h:
+                    break
+        alpha_by_target[label] = by_h
 
-    common_days = sorted(set(sip_by_h.keys()) & set(dem_by_h.keys()))
+    all_days: set[int] = set()
+    for by_h in alpha_by_target.values():
+        all_days.update(by_h.keys())
+    common_days = sorted(all_days)
     if not common_days:
-        st.info("No overlapping horizons between Price and Demand backtests.")
+        st.info("No overlapping horizons between backtests.")
         return
 
     fig = go.Figure()
-
-    fig.add_trace(go.Bar(
-        x=[f"{d}d" for d in common_days],
-        y=[sip_by_h[d] for d in common_days],
-        name=f"Price Alpha ({sip_method})",
-        marker_color=COLOUR_PRIMARY,
-        opacity=0.8,
-    ))
-    fig.add_trace(go.Bar(
-        x=[f"{d}d" for d in common_days],
-        y=[dem_by_h[d] for d in common_days],
-        name=f"Demand Alpha ({demand_method})",
-        marker_color=COLOUR_SUCCESS,
-        opacity=0.8,
-    ))
+    for label, (_key, colour) in available.items():
+        by_h = alpha_by_target.get(label, {})
+        fig.add_trace(go.Bar(
+            x=[f"{d}d" for d in common_days],
+            y=[by_h.get(d, 0) for d in common_days],
+            name=f"{label} ({methods.get(label, '')})",
+            marker_color=colour,
+            opacity=0.8,
+        ))
 
     fig.add_hline(y=0, line_color="white", line_width=1, line_dash="dash")
     fig.update_layout(
@@ -762,30 +787,36 @@ def _render_combined_analysis() -> None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    both_positive = [d for d in common_days if sip_by_h[d] > 0 and dem_by_h[d] > 0]
-    if both_positive:
+    all_labels = list(available.keys())
+    all_positive_days = [
+        d for d in common_days
+        if all(alpha_by_target.get(lbl, {}).get(d, -1) > 0 for lbl in all_labels)
+    ]
+    if all_positive_days:
         st.success(
-            f"**Joint alpha detected at horizons:** {', '.join(f'{d}d' for d in both_positive)}. "
-            f"At these horizons, you can forecast both price AND demand better than their "
-            f"respective benchmarks — these are the strongest signals for capacity allocation."
+            f"**Joint alpha detected at horizons:** {', '.join(f'{d}d' for d in all_positive_days)}. "
+            f"At these horizons, all available forecasts beat their benchmarks — "
+            f"these are the strongest signals for capacity allocation."
         )
     else:
         st.warning(
-            "No horizons found where both Price and Demand forecasts simultaneously "
+            "No horizons found where all available forecasts simultaneously "
             "beat their benchmarks. Consider adjusting methods or lookback windows."
         )
 
     combo_rows = []
     for d in common_days:
-        sip_a = sip_by_h[d]
-        dem_a = dem_by_h[d]
-        combined = sip_a + dem_a
-        both = "✅" if sip_a > 0 and dem_a > 0 else "❌"
-        combo_rows.append({
-            "Horizon": f"{d}d",
-            "Price Alpha (£/MWh)": f"{sip_a:+.2f}",
-            "Demand Alpha (MW)": f"{dem_a:+.2f}",
-            "Combined Score": f"{combined:+.2f}",
-            "Both Positive": both,
-        })
+        row: dict[str, str] = {"Horizon": f"{d}d"}
+        total = 0.0
+        all_pos = True
+        for label in all_labels:
+            a = alpha_by_target.get(label, {}).get(d, 0.0)
+            unit_str = "MW" if label == "Demand" else "£/MWh"
+            row[f"{label} Alpha ({unit_str})"] = f"{a:+.2f}"
+            total += a
+            if a <= 0:
+                all_pos = False
+        row["Combined Score"] = f"{total:+.2f}"
+        row["All Positive"] = "✅" if all_pos else "❌"
+        combo_rows.append(row)
     st.dataframe(pd.DataFrame(combo_rows), use_container_width=True, hide_index=True)

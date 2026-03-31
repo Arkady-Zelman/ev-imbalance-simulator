@@ -416,9 +416,59 @@ Naturally penalises over-commitment when SIP tail risk is severe. Half-Kelly (f=
 is industry standard: ~75% of growth rate with ~50% of drawdown variance.
 """)
 
-    # ── 5. Forecast Backtesting Methodology ───────────────────────────
+    # ── 5. Capacity Allocation Optimizer ─────────────────────────────
     st.markdown("---")
-    st.subheader("5. Forecast Backtesting & Alpha Detection")
+    st.subheader("5. Capacity Allocation Optimizer")
+    st.markdown("""
+**Purpose:** Given forecasts for SIP (balancing price), MIP (wholesale price), and fleet
+delivery uncertainty from Monte Carlo, the optimizer recommends how much MW to commit to
+wholesale markets vs. the balancing mechanism per settlement period — and whether to overbook.
+
+**MIP as Wholesale Proxy:**
+- The **Market Index Price (MIP)** is the GB wholesale reference price, derived from
+  power exchange trades (EPEX, N2EX). It is already fetched via the ELEXON API.
+- True day-ahead auction prices are not freely available on the ELEXON no-key API.
+  MIP is the established proxy and represents the price a trader would receive for
+  wholesale day-ahead commitments.
+
+**Revenue Model (per settlement period, per MC run):**
+```
+wholesale_rev   = W × 0.5h × MIP_forecast
+bm_dispatched   = min(B, max(0, delivered − W))
+bm_rev          = bm_dispatched × 0.5h × SIP_forecast
+shortfall       = max(0, W − delivered)
+shortfall_cost  = shortfall × 0.5h × |SIP_forecast|
+net             = wholesale_rev + bm_rev − shortfall_cost
+```
+
+Where:
+- `W` = MW committed to wholesale market
+- `B` = MW reserved for balancing mechanism
+- `delivered` = actual delivery per MC simulation run
+
+**Optimisation Approach:**
+- Grid search over W from 0 to P99 of delivered MW per SP
+- B = max(0, P50_delivered − W) — remaining expected capacity goes to BM
+- Score = (1−λ) × E[revenue] + λ × ES₅(revenue)
+- λ (risk tolerance) is user-configurable: 0=risk-neutral, 1=risk-averse
+
+**Overbook / Underbook:**
+- **Overbook** (total > expected delivery): higher revenue potential, higher
+  shortfall risk. Optimal when SIP is low (cheap imbalance) and MIP is high.
+- **Underbook** (total < expected delivery): lower revenue, lower risk.
+  Optimal when SIP is high (expensive imbalance).
+- **Match**: commit exactly expected delivery. Default conservative strategy.
+
+**Strategy Comparison:**
+Three strategies are compared across the full MC distribution:
+1. **Pure Wholesale** — commit P50 delivery entirely to wholesale
+2. **Pure Balancing** — reserve P50 delivery entirely for BM
+3. **Optimal Split** — the optimizer's recommended allocation
+""")
+
+    # ── 6. Forecast Backtesting Methodology ───────────────────────────
+    st.markdown("---")
+    st.subheader("6. Forecast Backtesting & Alpha Detection")
     st.markdown("""
 The backtesting engine evaluates whether our SIP forecasting models can generate
 **alpha** (systematic advantage) over the market forward price (MIP) at various
@@ -449,9 +499,9 @@ forecast comparison, and Benjamini-Hochberg FDR correction for multiple testing 
 the lookback × horizon grid.
 """)
 
-    # ── 6. Summary: What's Real vs Assumed ────────────────────────────
+    # ── 7. Summary: What's Real vs Assumed ────────────────────────────
     st.markdown("---")
-    st.subheader("6. Summary: What's Live Data vs What's Assumed")
+    st.subheader("7. Summary: What's Live Data vs What's Assumed")
 
     summary = pd.DataFrame([
         {"Component": "SIP prices (empirical bootstrap)", "Source": "ELEXON API (live)", "Hardcoded?": "No"},
@@ -471,9 +521,9 @@ the lookback × horizon grid.
     ])
     st.dataframe(summary, use_container_width=True, hide_index=True)
 
-    # ── 7. Assumptions & Limitations ──────────────────────────────────
+    # ── 8. Assumptions & Limitations ──────────────────────────────────
     st.markdown("---")
-    st.subheader("7. Assumptions & Limitations")
+    st.subheader("8. Assumptions & Limitations")
     st.markdown("""
 - **Charger homogeneity:** All chargers are assumed to be Ohme Home Pro (7.4 kW). In reality,
   the fleet may include different charger models with varying capacities.
@@ -502,9 +552,9 @@ the lookback × horizon grid.
   The backtesting framework is designed to be model-agnostic.
 """)
 
-    # ── 8. References ─────────────────────────────────────────────────
+    # ── 9. References ─────────────────────────────────────────────────
     st.markdown("---")
-    st.subheader("8. References")
+    st.subheader("9. References")
     st.markdown("""
 - **CrowdFlex Trial (Ohme / National Grid ESO):** Demonstrated 42% overnight and 53% daytime
   increases in smart charging engagement with appropriate incentive design. Used as basis for
