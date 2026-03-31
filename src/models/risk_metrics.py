@@ -21,7 +21,7 @@ class RiskSummary:
     skew_pnl: float
     kurtosis_pnl: float
     var_95: float
-    cvar_95: float
+    es_95: float
     capture_ratio_mean: float
     reward_to_risk: float         # mean(P&L) / std(P&L) — within-day signal-to-noise, not annualised Sharpe
     max_loss: float
@@ -33,8 +33,8 @@ def compute_var(pnl: np.ndarray, confidence: float = 0.95) -> float:
     return float(np.percentile(pnl, (1 - confidence) * 100))
 
 
-def compute_cvar(pnl: np.ndarray, confidence: float = 0.95) -> float:
-    """Conditional VaR (Expected Shortfall): mean of losses beyond VaR."""
+def compute_es(pnl: np.ndarray, confidence: float = 0.95) -> float:
+    """Expected Shortfall: mean of P&L in the tail beyond VaR."""
     var = compute_var(pnl, confidence)
     tail = pnl[pnl <= var]
     return float(tail.mean()) if len(tail) > 0 else var
@@ -80,7 +80,7 @@ def compute_risk_summary(pnl: np.ndarray, capture_ratios: np.ndarray) -> RiskSum
         skew_pnl=float(skew(pnl)),
         kurtosis_pnl=float(kurtosis(pnl)),
         var_95=compute_var(pnl),
-        cvar_95=compute_cvar(pnl),
+        es_95=compute_es(pnl),
         capture_ratio_mean=float(np.mean(capture_ratios)),
         reward_to_risk=float(np.mean(pnl) / max(np.std(pnl), 1e-9)),
         max_loss=float(np.min(pnl)),
@@ -108,7 +108,7 @@ def sensitivity_sweep(
             "param_value": val,
             "mean_pnl": summary.mean_pnl,
             "var_95": summary.var_95,
-            "cvar_95": summary.cvar_95,
+            "es_95": summary.es_95,
             "capture_ratio": summary.capture_ratio_mean,
             "sharpe": summary.reward_to_risk,
         })

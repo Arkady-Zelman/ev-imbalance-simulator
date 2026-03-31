@@ -9,7 +9,6 @@ import streamlit as st
 
 from src.config import COLOUR_PRIMARY, PLOTLY_TEMPLATE, RISK_APPETITES
 from src.models.pnl_calculator import compute_pnl_for_position
-from src.models.risk_metrics import compute_cvar, compute_var
 from src.session_keys import ALL_POSITIONS, DA_PRICE, PARAMS, RESULT, RISK_SUMMARY, SIP_MATRIX
 from src.visualization.charts import (
     delivered_vs_traded_scatter,
@@ -32,14 +31,14 @@ def render(has_results: bool) -> None:
 
     # ── Main P&L histogram ────────────────────────────────────────────
     st.subheader(f"Daily P&L Distribution (P{params.risk_percentile} Position)")
-    fig_pnl = pnl_histogram(result.daily_pnl, risk.var_95, risk.cvar_95)
+    fig_pnl = pnl_histogram(result.daily_pnl, risk.var_95, risk.es_95)
     st.plotly_chart(fig_pnl, use_container_width=True)
 
     # ── Summary statistics table ──────────────────────────────────────
     st.subheader("Summary Statistics")
     stats_data = {
         "Metric": ["Mean", "Median", "Std Dev", "Skewness", "Kurtosis",
-                    "VaR (95%)", "CVaR (95%)", "Max Loss", "Max Gain"],
+                    "VaR (95%)", "ES (95%)", "Max Loss", "Max Gain"],
         "Value": [
             f"£{risk.mean_pnl:,.0f}",
             f"£{risk.median_pnl:,.0f}",
@@ -47,7 +46,7 @@ def render(has_results: bool) -> None:
             f"{risk.skew_pnl:.3f}",
             f"{risk.kurtosis_pnl:.3f}",
             f"£{risk.var_95:,.0f}",
-            f"£{risk.cvar_95:,.0f}",
+            f"£{risk.es_95:,.0f}",
             f"£{risk.max_loss:,.0f}",
             f"£{risk.max_gain:,.0f}",
         ],

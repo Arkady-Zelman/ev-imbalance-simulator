@@ -52,7 +52,7 @@ src/
     portfolio.py            # Beta-copula plug-in rate model
     monte_carlo.py          # Vectorised MC simulation engine
     trading_position.py     # Position-sizing logic
-    risk_metrics.py         # VaR, CVaR, capture ratio, reward-to-risk
+    risk_metrics.py         # VaR, ES (Expected Shortfall), capture ratio, reward-to-risk
     pnl_calculator.py       # Shared P&L computation
     sip_models.py           # Regime-switching SIP generation + fitting
     kelly.py                # Kelly Criterion optimal position sizing
@@ -103,7 +103,7 @@ pytest tests/ -v
 | 1 | Executive Summary | Traffic-light risk assessment, key metrics at a glance |
 | 2 | Portfolio Availability | Beta distribution plug-in rates by SP, delivered MW |
 | 3 | Monte Carlo Results | P&L distribution, imbalance cost breakdown |
-| 4 | Risk Analysis | VaR/CVaR, capture ratios, Kelly Criterion analysis |
+| 4 | Risk Analysis | VaR/ES, capture ratios, Kelly Criterion analysis |
 | 5 | Sensitivity Analysis | Tornado charts, diversification curves |
 | 6 | Scenario Comparison | Benign vs stressed SIP regimes, custom scenarios |
 | 7 | Historical SIP Explorer | Interactive SIP/MIP time series and distributions |

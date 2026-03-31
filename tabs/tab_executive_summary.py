@@ -30,8 +30,8 @@ def render(has_results: bool) -> None:
         st.metric("VaR (95%)", f"£{risk.var_95:,.0f}",
                    help="On 95% of days, losses will not exceed this amount")
     with c3:
-        st.metric("CVaR (95%)", f"£{risk.cvar_95:,.0f}",
-                   help="Expected loss on the worst 5% of days")
+        st.metric("ES (95%)", f"£{risk.es_95:,.0f}",
+                   help="Expected Shortfall: mean P&L on the worst 5% of days")
     with c4:
         st.metric("Capture Ratio", f"{risk.capture_ratio_mean:.3f}",
                    help="Actual revenue / benchmark revenue (1.0 = perfect)")
@@ -53,16 +53,16 @@ def render(has_results: bool) -> None:
     st.markdown("---")
     st.subheader("Risk Status")
 
-    cvar_abs = abs(risk.cvar_95)
+    es_abs = abs(risk.es_95)
     daily_rev = float(risk.mean_pnl + np.mean(result.daily_imbalance_cost))
 
     if daily_rev > 0:
-        risk_ratio = cvar_abs / daily_rev
+        risk_ratio = es_abs / daily_rev
     else:
         risk_ratio = 10.0
 
     if risk_ratio < 0.5:
-        colour, label, desc = "🟢", "LOW RISK", "CVaR is well within daily revenue capacity."
+        colour, label, desc = "🟢", "LOW RISK", "ES is well within daily revenue capacity."
     elif risk_ratio < 1.5:
         colour, label, desc = "🟡", "MODERATE RISK", "Tail losses could materially impact daily revenue."
     else:
@@ -104,7 +104,7 @@ def render(has_results: bool) -> None:
         f"imbalance costs. However, the distribution is **negatively skewed** (skew = {risk.skew_pnl:.2f}), "
         f"reflecting the asymmetric cost of being short at high System Imbalance Prices. "
         f"The 95% Value-at-Risk is **£{risk.var_95:,.0f}**, meaning on 95% of days losses do not "
-        f"exceed this level. On the worst 5% of days, the expected loss (CVaR) is **£{risk.cvar_95:,.0f}**.\n\n"
+        f"exceed this level. On the worst 5% of days, the expected loss (Expected Shortfall) is **£{risk.es_95:,.0f}**.\n\n"
         f"The mean capture ratio of **{risk.capture_ratio_mean:.3f}** indicates that, on average, "
     )
     if risk.capture_ratio_mean >= 0.95:

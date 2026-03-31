@@ -143,6 +143,9 @@ def run_rolling_backtest(
                             mip_values=mip_values, demand_values=demand_values,
                             xgb_params=xgb_params,
                         )
+                elif method == "neuralprophet":
+                    from src.models.prophet_forecaster import _neuralprophet_forecast
+                    fc = _neuralprophet_forecast(target_values, idx, lb_sps, [h_sps])
                 elif method == "ewma":
                     fc = _ewma_forecast(target_values, idx, lb_sps, [h_sps], alpha=ewma_alpha)
                 else:

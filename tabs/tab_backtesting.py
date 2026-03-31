@@ -114,8 +114,17 @@ def _render_backtesting_body() -> None:
         selected_lookbacks = [available_lookbacks[lb] for lb in selected_lb_labels]
 
     with col2:
-        method = st.radio("Forecast method", ["TOD Mean", "EWMA", "XGBoost"], horizontal=True)
-        method_key = {"TOD Mean": "tod_mean", "EWMA": "ewma", "XGBoost": "xgb"}[method]
+        method = st.radio(
+            "Forecast method",
+            ["TOD Mean", "EWMA", "XGBoost", "NeuralProphet"],
+            horizontal=True,
+        )
+        method_key = {
+            "TOD Mean": "tod_mean",
+            "EWMA": "ewma",
+            "XGBoost": "xgb",
+            "NeuralProphet": "neuralprophet",
+        }[method]
 
     with col3:
         step_size = st.select_slider(

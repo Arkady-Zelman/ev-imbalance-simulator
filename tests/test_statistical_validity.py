@@ -203,7 +203,7 @@ class TestStressCoupling:
     """Verify the SIP-availability stress coupling works."""
 
     def test_stress_increases_tail_risk(self):
-        """With stress coupling, CVaR should be worse (more negative) than without."""
+        """With stress coupling, ES should be worse (more negative) than without."""
         sip_varied = np.random.default_rng(42).lognormal(4.0, 0.8, (50, 48))
 
         params_no_stress = SimulationParams(

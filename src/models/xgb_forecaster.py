@@ -126,13 +126,18 @@ def _build_features(
 
 
 _DEFAULT_XGB_PARAMS: Dict[str, object] = {
-    "n_estimators": 80,
-    "max_depth": 4,
+    "n_estimators": 100,
+    "max_depth": 5,
     "learning_rate": 0.1,
+    "reg_alpha": 0.1,
+    "reg_lambda": 0.1,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
-    "reg_alpha": 0.1,
-    "reg_lambda": 1.0,
+    "gamma": 0.1,
+    "min_child_weight": 5,
+    "max_delta_step": 1,
+    "scale_pos_weight": 5,
+    "base_score": 0.5,
 }
 
 

@@ -75,20 +75,25 @@ def _render_rolling_backtest_body() -> None:
     with col1:
         target_label = st.radio(
             "Forecast target",
-            ["SIP (Price)", "Demand"] if has_demand else ["SIP (Price)"],
+            ["Price", "Demand"] if has_demand else ["Price"],
             horizontal=True,
             key="rb_target",
         )
         target_key = "demand" if target_label == "Demand" else "sip"
     with col2:
-        method_options = ["TOD Mean", "EWMA", "XGBoost"]
+        method_options = ["TOD Mean", "EWMA", "XGBoost", "NeuralProphet"]
         method = st.radio(
             "Forecast method",
             method_options,
             horizontal=True,
             key="rb_method",
         )
-        method_key = {"TOD Mean": "tod_mean", "EWMA": "ewma", "XGBoost": "xgb"}[method]
+        method_key = {
+            "TOD Mean": "tod_mean",
+            "EWMA": "ewma",
+            "XGBoost": "xgb",
+            "NeuralProphet": "neuralprophet",
+        }[method]
     with col3:
         ewma_alpha = st.slider(
             "EWMA α", 0.01, 0.30, 0.05, 0.01,
@@ -102,25 +107,33 @@ def _render_rolling_backtest_body() -> None:
 
     # ── XGBoost: Train / Show Results workflow ────────────────────────
     if method_key == "xgb":
-        target_desc = "Demand" if target_key == "demand" else "SIP (Price)"
+        target_desc = "Demand" if target_key == "demand" else "Price"
         ss_key = f"_xgb_trained_models_{target_key}"
 
         st.markdown("---")
-        st.subheader(f"XGBoost Model Training — {target_desc}")
+        st.subheader(f"XGBoost {target_desc} Model Training")
         st.caption(
-            f"Train a **{target_desc}** model with grid search, then view results anytime. "
+            f"Train a **{target_desc}** forecast model, then view results anytime. "
             "Price and Demand models are stored separately and persist across sessions."
         )
 
-        col_train, col_show = st.columns(2)
-        with col_train:
-            train_btn = st.button(
-                f"🏋️ Train {target_desc} Model",
+        col_deep, col_quick, col_show = st.columns(3)
+        with col_deep:
+            deep_btn = st.button(
+                f"🏋️ In-Depth Search ({target_desc})",
                 use_container_width=True,
                 type="primary",
-                key="rb_xgb_train",
-                help=f"Grid search over 27 hyperparameter combos for {target_desc} forecasting. "
-                     "Takes several minutes.",
+                key="rb_xgb_deep",
+                help="Systematic grid search over core hyperparameters (27 combos). "
+                     "Run periodically for best accuracy. Takes several minutes.",
+            )
+        with col_quick:
+            quick_btn = st.button(
+                f"⚡ Quick Random Search ({target_desc})",
+                use_container_width=True,
+                key="rb_xgb_quick",
+                help="Random search across all hyperparameters (30 samples). "
+                     "Faster estimate for point-in-time tuning.",
             )
         with col_show:
             show_btn = st.button(
@@ -130,7 +143,14 @@ def _render_rolling_backtest_body() -> None:
                 help=f"Load and display results from the last trained {target_desc} model.",
             )
 
-        if train_btn:
+        search_mode = None
+        if deep_btn:
+            search_mode = "grid"
+        elif quick_btn:
+            search_mode = "random"
+
+        if search_mode is not None:
+            mode_label = "In-depth grid" if search_mode == "grid" else "Quick random"
             with st.spinner("Aligning SIP, MIP and Demand series…"):
                 sip_series, mip_series, demand_series = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
@@ -155,6 +175,7 @@ def _render_rolling_backtest_body() -> None:
                 demand_series=demand_series,
                 target=target_key,
                 progress_callback=_progress,
+                param_search_mode=search_mode,
             )
             progress_bar.empty()
             status_text.empty()
@@ -169,8 +190,9 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
             st.success(
-                f"{target_desc} training complete — {len(trained.backtest_errors)} backtest "
-                f"configurations evaluated. Model saved to disk."
+                f"{mode_label} {target_desc} training complete — "
+                f"{len(trained.backtest_errors)} backtest configurations evaluated. "
+                f"Model saved to disk."
             )
 
         if show_btn:
@@ -183,7 +205,7 @@ def _render_rolling_backtest_body() -> None:
             if trained is None:
                 st.info(
                     f"No trained {target_desc} model found. "
-                    f"Press **Train {target_desc} Model** first."
+                    f"Press one of the training buttons first."
                 )
                 return
 
@@ -198,9 +220,10 @@ def _render_rolling_backtest_body() -> None:
             st.session_state["_rb_last_key"] = rb_key_prefix
 
     else:
-        # ── TOD Mean / EWMA: standard single-button flow ─────────────
+        # ── TOD Mean / EWMA / NeuralProphet: standard single-button flow
+        target_desc = "Demand" if target_key == "demand" else "Price"
         run_btn = st.button(
-            "🔬 Run Rolling Backtest",
+            f"🔬 Run {target_desc} Rolling Backtest ({method})",
             use_container_width=True,
             type="primary",
             key="rb_run",
@@ -220,7 +243,6 @@ def _render_rolling_backtest_body() -> None:
                 )
                 return
 
-            target_desc = "Demand" if target_key == "demand" else "SIP"
             st.caption(f"Data: {len(sip_series):,} SPs ({n_days} days) — "
                        f"{sip_series.index[0]} → {sip_series.index[-1]}  |  "
                        f"Target: **{target_desc}**  |  Method: **{method}**")
@@ -527,13 +549,22 @@ def _render_rolling_backtest_body() -> None:
 **XGBoost method:**
 - Trains a fresh gradient-boosted tree per (lookback, horizon) at each origin.
 - Features: time-of-day, day-of-week, lags (1d/2d/7d), rolling stats, MIP, demand.
-- Computationally heavier but captures non-linear dynamics and interactions.
+- **In-depth search:** systematic grid over core hyperparams (27 combos).
+- **Quick random search:** samples all hyperparams (30 combos) for fast estimation.
+- Assessment criterion: **worst-window MAE** (worst consecutive 3-day stretch) — ensures
+  robustness at any point along the forward curve.
+
+**NeuralProphet method:**
+- Combines AR-Net (autoregression) with Prophet's trend + seasonality decomposition.
+- Captures half-hourly and weekly patterns natively via Fourier terms.
+- Heavier than TOD Mean/EWMA but lighter than XGBoost; good for structured patterns.
+- Falls back to TOD Mean if neuralprophet is not installed.
 
 **Demand target:**
 - When forecasting demand, the benchmark is the TOD-mean of demand itself
   (how well does a simple seasonal average predict demand).
 - Demand is smoother than SIP, so baseline models perform better —
-  XGBoost adds value by capturing weather/calendar effects.
+  XGBoost/NeuralProphet add value by capturing weather/calendar effects.
 """)
 
     # ══════════════════════════════════════════════════════════════════
@@ -560,7 +591,7 @@ def _display_training_summary(trained) -> None:
                 "n_estimators": params.get("n_estimators"),
                 "max_depth": params.get("max_depth"),
                 "learning_rate": params.get("learning_rate"),
-                "Val MAE": f"{score:.2f}" if score != float("inf") else "N/A",
+                "Worst-Window MAE": f"{score:.2f}" if score != float("inf") else "N/A",
             })
     if summary_rows:
         with st.expander("Grid Search Results — Best Params per (Lookback, Horizon)"):
@@ -609,7 +640,7 @@ def _render_forward_forecast() -> None:
     )
 
     for trained, label, unit, y_label in [
-        (trained_sip, "SIP (Price)", "£/MWh", "Predicted SIP (£/MWh)"),
+        (trained_sip, "Price", "£/MWh", "Predicted Price (£/MWh)"),
         (trained_demand, "Demand", "MW", "Predicted Demand (MW)"),
     ]:
         if trained is None or not trained.final_models:
@@ -671,9 +702,9 @@ def _render_combined_analysis() -> None:
         return
 
     st.markdown("---")
-    st.subheader("7. Combined SIP + Demand Alpha Analysis")
+    st.subheader("7. Combined Price + Demand Alpha Analysis")
     st.caption(
-        "When both a SIP and Demand rolling backtest have been run, this section "
+        "When both a Price and Demand rolling backtest have been run, this section "
         "shows where you have forecast alpha on **both** axes simultaneously — "
         "essential for capacity allocation decisions."
     )
@@ -699,7 +730,7 @@ def _render_combined_analysis() -> None:
 
     common_days = sorted(set(sip_by_h.keys()) & set(dem_by_h.keys()))
     if not common_days:
-        st.info("No overlapping horizons between SIP and Demand backtests.")
+        st.info("No overlapping horizons between Price and Demand backtests.")
         return
 
     fig = go.Figure()
@@ -707,7 +738,7 @@ def _render_combined_analysis() -> None:
     fig.add_trace(go.Bar(
         x=[f"{d}d" for d in common_days],
         y=[sip_by_h[d] for d in common_days],
-        name=f"SIP Alpha ({sip_method})",
+        name=f"Price Alpha ({sip_method})",
         marker_color=COLOUR_PRIMARY,
         opacity=0.8,
     ))
@@ -740,7 +771,7 @@ def _render_combined_analysis() -> None:
         )
     else:
         st.warning(
-            "No horizons found where both SIP and Demand forecasts simultaneously "
+            "No horizons found where both Price and Demand forecasts simultaneously "
             "beat their benchmarks. Consider adjusting methods or lookback windows."
         )
 
@@ -752,7 +783,7 @@ def _render_combined_analysis() -> None:
         both = "✅" if sip_a > 0 and dem_a > 0 else "❌"
         combo_rows.append({
             "Horizon": f"{d}d",
-            "SIP Alpha (£/MWh)": f"{sip_a:+.2f}",
+            "Price Alpha (£/MWh)": f"{sip_a:+.2f}",
             "Demand Alpha (MW)": f"{dem_a:+.2f}",
             "Combined Score": f"{combined:+.2f}",
             "Both Positive": both,

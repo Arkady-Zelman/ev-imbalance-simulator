@@ -37,12 +37,12 @@ def _apply_defaults(fig: go.Figure, **overrides) -> go.Figure:
     return fig
 
 
-# ── P&L histogram with VaR / CVaR lines ──────────────────────────────────
+# ── P&L histogram with VaR / ES lines ──────────────────────────────────
 
 def pnl_histogram(
     pnl: np.ndarray,
     var_95: float,
-    cvar_95: float,
+    es_95: float,
     title: str = "Daily P&L Distribution",
 ) -> go.Figure:
     fig = go.Figure()
@@ -54,8 +54,8 @@ def pnl_histogram(
     fig.add_vline(x=var_95, line_dash="dash", line_color=COLOUR_WARNING,
                   annotation_text=f"VaR(95%) = £{var_95:,.0f}",
                   annotation_position="top left")
-    fig.add_vline(x=cvar_95, line_dash="dot", line_color=COLOUR_DANGER,
-                  annotation_text=f"CVaR(95%) = £{cvar_95:,.0f}",
+    fig.add_vline(x=es_95, line_dash="dot", line_color=COLOUR_DANGER,
+                  annotation_text=f"ES(95%) = £{es_95:,.0f}",
                   annotation_position="top left")
     return _apply_defaults(fig, title=title,
                            xaxis_title="Daily P&L (£)",
@@ -108,12 +108,12 @@ def delivered_vs_traded_scatter(
 def risk_return_frontier(
     labels: List[str],
     expected_pnl: List[float],
-    cvar_values: List[float],
+    es_values: List[float],
     title: str = "Risk-Return Frontier",
 ) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=cvar_values, y=expected_pnl,
+        x=es_values, y=expected_pnl,
         mode="lines+markers+text",
         text=labels,
         textposition="top center",
@@ -121,7 +121,7 @@ def risk_return_frontier(
         line=dict(color=COLOUR_ACCENT, width=2),
     ))
     return _apply_defaults(fig, title=title,
-                           xaxis_title="CVaR 95% – Expected Tail Loss (£)",
+                           xaxis_title="ES 95% – Expected Tail Loss (£)",
                            yaxis_title="Expected Daily P&L (£)")
 
 
@@ -150,7 +150,7 @@ def tornado_diagram(
     low_values: List[float],
     high_values: List[float],
     base_value: float,
-    title: str = "CVaR Sensitivity (Tornado)",
+    title: str = "ES Sensitivity (Tornado)",
 ) -> go.Figure:
     sorted_idx = np.argsort([abs(h - l) for l, h in zip(low_values, high_values)])
     param_names = [param_names[i] for i in sorted_idx]
@@ -174,7 +174,7 @@ def tornado_diagram(
     ))
     fig.add_vline(x=0, line_color="white", line_width=1)
     return _apply_defaults(fig, title=title,
-                           xaxis_title=f"Change in CVaR from base (£{base_value:,.0f})",
+                           xaxis_title=f"Change in ES from base (£{base_value:,.0f})",
                            barmode="overlay")
 
 

@@ -396,13 +396,13 @@ Fallback defaults (used only if data is insufficient):
 | Metric | Definition | Formula |
 |--------|-----------|---------|
 | **VaR (95%)** | On 95% of days, P&L will not be worse than this | 5th percentile of P&L distribution |
-| **CVaR (95%)** | Expected loss on the worst 5% of days | Mean of P&L values ≤ VaR |
+| **ES (95%)** | Expected Shortfall: mean loss on the worst 5% of days | Mean of P&L values ≤ VaR |
 | **Capture Ratio** | Actual revenue / benchmark revenue | (DA revenue − SIP-settled imbalance cost) / (delivered × DA price) |
 | **Reward-to-Risk** | Risk-adjusted return (within-day signal-to-noise) | Mean(P&L) / Std(P&L) |
 
-**Why CVaR over VaR:** VaR tells you the boundary of "normal" losses. CVaR tells you what to
+**Why ES over VaR:** VaR tells you the boundary of "normal" losses. Expected Shortfall tells you what to
 expect *when things go wrong*. Given the fat-tailed SIP distribution, the gap between VaR and
-CVaR is large — this is exactly the risk that matters for an EV aggregator.
+ES is large — this is exactly the risk that matters for an EV aggregator.
 """)
 
     st.markdown("#### 4.6 Position Sizing")

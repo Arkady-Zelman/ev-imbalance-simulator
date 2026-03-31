@@ -11,11 +11,14 @@ Workflow:
 
 from __future__ import annotations
 
+import itertools
 import logging
+import random
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,14 +57,18 @@ GRID = {
     "n_estimators": [50, 100, 200],
     "max_depth": [3, 5, 7],
     "learning_rate": [0.05, 0.1, 0.2],
+    "reg_alpha": [0.01, 0.1, 1.0],
+    "reg_lambda": [0.01, 0.1, 1.0],
+    "subsample": [0.5, 0.8, 1.0],
+    "colsample_bytree": [0.5, 0.8, 1.0],
+    "gamma": [0.0, 0.1, 0.5],
+    "min_child_weight": [1, 5, 10],
+    "max_delta_step": [0, 1, 5],
+    "scale_pos_weight": [1, 5, 10],
+    "base_score": [0.0, 0.5, 1.0],
 }
 
-_FIXED_PARAMS = {
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "reg_alpha": 0.1,
-    "reg_lambda": 1.0,
-}
+CORE_GRID_KEYS = ("n_estimators", "max_depth", "learning_rate")
 
 REPRESENTATIVE_HORIZONS = [48, 48 * 3, 48 * 7, 48 * 14]
 
@@ -78,16 +85,46 @@ class TrainedXGBModels:
     backtest_crossovers: List[CrossoverResult] = field(default_factory=list)
 
 
-def _generate_param_combos() -> List[dict]:
-    combos = []
-    for ne in GRID["n_estimators"]:
-        for md in GRID["max_depth"]:
-            for lr in GRID["learning_rate"]:
-                p = dict(_FIXED_PARAMS)
-                p["n_estimators"] = ne
-                p["max_depth"] = md
-                p["learning_rate"] = lr
-                combos.append(p)
+def _grid_middle_value(param: str) -> Any:
+    """Single representative value per hyperparameter (middle list entry)."""
+    values = GRID[param]
+    return values[len(values) // 2]
+
+
+def _default_params_from_grid() -> dict:
+    """Fallback XGBRegressor kwargs when no tuned params exist."""
+    return {k: _grid_middle_value(k) for k in GRID}
+
+
+def _generate_grid_combos() -> List[dict]:
+    """
+    In-depth search: full Cartesian product over core params only; other
+    hyperparameters fixed at GRID middle values (27 combos).
+    """
+    fixed_tail = {k: _grid_middle_value(k) for k in GRID if k not in CORE_GRID_KEYS}
+    combos: List[dict] = []
+    for ne, md, lr in itertools.product(
+        GRID["n_estimators"],
+        GRID["max_depth"],
+        GRID["learning_rate"],
+    ):
+        p = dict(fixed_tail)
+        p["n_estimators"] = ne
+        p["max_depth"] = md
+        p["learning_rate"] = lr
+        combos.append(p)
+    return combos
+
+
+def _generate_random_combos(n_samples: int = 30, seed: int = 42) -> List[dict]:
+    """
+    Random search: each combo picks one value per GRID key independently.
+    """
+    rng = random.Random(seed)
+    keys = list(GRID.keys())
+    combos: List[dict] = []
+    for _ in range(n_samples):
+        combos.append({k: rng.choice(GRID[k]) for k in keys})
     return combos
 
 
@@ -140,6 +177,22 @@ def _build_train_data(
     return X, y, col_means
 
 
+_WORST_WINDOW_SPS = 48 * 3  # 3-day rolling window for worst-case MAE
+
+
+def _worst_window_mae(errors: np.ndarray, window: int = _WORST_WINDOW_SPS) -> float:
+    """
+    Worst-case MAE over any rolling window of `window` samples.
+    Selects the model that minimises the worst consecutive stretch,
+    not just the average — more robust for forward-curve trading.
+    """
+    if len(errors) <= window:
+        return float(np.mean(errors))
+    cumsum = np.cumsum(errors)
+    rolling_sum = cumsum[window:] - cumsum[:-window]
+    return float(np.max(rolling_sum) / window)
+
+
 def _grid_search_single(
     X: np.ndarray,
     y: np.ndarray,
@@ -147,7 +200,10 @@ def _grid_search_single(
 ) -> Tuple[dict, float]:
     """
     Time-series-safe grid search: last 20% as validation.
-    Returns (best_params, best_val_mae).
+    Picks the combo with the lowest worst-window MAE (worst consecutive
+    3-day stretch) rather than average MAE, to ensure robustness at
+    any point along the forward curve.
+    Returns (best_params, best_worst_window_mae).
     """
     n = len(y)
     split = int(n * 0.8)
@@ -157,7 +213,7 @@ def _grid_search_single(
     X_train, X_val = X[:split], X[split:]
     y_train, y_val = y[:split], y[split:]
 
-    best_mae = float("inf")
+    best_score = float("inf")
     best_params = param_combos[0]
 
     for params in param_combos:
@@ -169,12 +225,13 @@ def _grid_search_single(
         )
         model.fit(X_train, y_train)
         preds = model.predict(X_val)
-        mae = float(np.mean(np.abs(preds - y_val)))
-        if mae < best_mae:
-            best_mae = mae
+        abs_errors = np.abs(preds - y_val)
+        score = _worst_window_mae(abs_errors)
+        if score < best_score:
+            best_score = score
             best_params = params
 
-    return best_params, best_mae
+    return best_params, best_score
 
 
 def train_xgb_models(
@@ -183,6 +240,8 @@ def train_xgb_models(
     demand_series: Optional[pd.Series] = None,
     target: str = "sip",
     progress_callback: Optional[Callable[[float, str], None]] = None,
+    param_search_mode: Literal["grid", "random"] = "grid",
+    random_search_samples: int = 30,
 ) -> TrainedXGBModels:
     """
     Full training pipeline:
@@ -195,9 +254,18 @@ def train_xgb_models(
     ----------
     target : "sip" or "demand" — which series to forecast.
     progress_callback(fraction, message) is called to update a progress bar.
+    param_search_mode : "grid" uses a 27-combo sweep on n_estimators, max_depth,
+        and learning_rate with other params at GRID medians; "random" draws
+        random_search_samples combos from the full GRID.
     """
     if not _HAS_XGB:
         raise RuntimeError("xgboost is not installed")
+
+    if param_search_mode == "grid":
+        param_combos = _generate_grid_combos()
+    else:
+        n = max(1, int(random_search_samples))
+        param_combos = _generate_random_combos(n_samples=n)
 
     sip_values = sip_series.values.astype(float)
     mip_values = mip_series.values.astype(float)
@@ -216,7 +284,6 @@ def train_xgb_models(
 
     target_desc = "Demand" if target == "demand" else "SIP"
 
-    param_combos = _generate_param_combos()
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
 
     lookbacks = list(ROLLING_LOOKBACKS.items())
@@ -287,22 +354,17 @@ def train_xgb_models(
 def _pick_global_best(
     best_params: Dict[str, Dict[int, dict]],
 ) -> dict:
-    """Pick the most common best param combo across all lookback/horizon cells."""
-    from collections import Counter
-    keys = []
+    """Pick the most common best param dict across all lookback/horizon cells."""
+    serialized: List[Tuple[Tuple[str, Any], ...]] = []
     for lb_params in best_params.values():
         for p in lb_params.values():
-            key = (p.get("n_estimators"), p.get("max_depth"), p.get("learning_rate"))
-            keys.append(key)
-    if not keys:
-        return dict(_FIXED_PARAMS, n_estimators=100, max_depth=5, learning_rate=0.1)
-    most_common = Counter(keys).most_common(1)[0][0]
-    return dict(
-        _FIXED_PARAMS,
-        n_estimators=most_common[0],
-        max_depth=most_common[1],
-        learning_rate=most_common[2],
-    )
+            if not p:
+                continue
+            serialized.append(tuple(sorted(p.items())))
+    if not serialized:
+        return _default_params_from_grid()
+    most_common_key = Counter(serialized).most_common(1)[0][0]
+    return dict(most_common_key)
 
 
 def forecast_forward(

@@ -9,7 +9,7 @@ import streamlit as st
 
 from src.config import COLOUR_ACCENT, PLOTLY_TEMPLATE
 from src.models.monte_carlo import SimulationParams, prepare_sip_matrix, run_simulation
-from src.models.risk_metrics import compute_cvar, compute_var
+from src.models.risk_metrics import compute_es, compute_var
 from src.models.sip_models import generate_custom_scenario_sip
 from src.session_keys import DA_PRICE, PARAMS, RESULT, SIP_DF
 from src.visualization.heatmaps import scenario_side_by_side
@@ -85,19 +85,19 @@ def render(has_results: bool) -> None:
 
     st.subheader("Scenario Metrics")
     comp_data = {
-        "Metric": ["Mean P&L", "Std P&L", "VaR (95%)", "CVaR (95%)", "Max Loss"],
+        "Metric": ["Mean P&L", "Std P&L", "VaR (95%)", "ES (95%)", "Max Loss"],
         "Benign": [
             f"£{np.mean(res_benign.daily_pnl):,.0f}",
             f"£{np.std(res_benign.daily_pnl):,.0f}",
             f"£{compute_var(res_benign.daily_pnl):,.0f}",
-            f"£{compute_cvar(res_benign.daily_pnl):,.0f}",
+            f"£{compute_es(res_benign.daily_pnl):,.0f}",
             f"£{np.min(res_benign.daily_pnl):,.0f}",
         ],
         "Stressed": [
             f"£{np.mean(res_stressed.daily_pnl):,.0f}",
             f"£{np.std(res_stressed.daily_pnl):,.0f}",
             f"£{compute_var(res_stressed.daily_pnl):,.0f}",
-            f"£{compute_cvar(res_stressed.daily_pnl):,.0f}",
+            f"£{compute_es(res_stressed.daily_pnl):,.0f}",
             f"£{np.min(res_stressed.daily_pnl):,.0f}",
         ],
     }
@@ -148,5 +148,5 @@ def render(has_results: bool) -> None:
         )
         st.plotly_chart(fig_c, use_container_width=True)
 
-        st.metric("Custom CVaR (95%)", f"£{compute_cvar(res_custom.daily_pnl):,.0f}")
+        st.metric("Custom ES (95%)", f"£{compute_es(res_custom.daily_pnl):,.0f}")
         st.metric("Custom Mean P&L", f"£{np.mean(res_custom.daily_pnl):,.0f}")

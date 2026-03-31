@@ -5,7 +5,7 @@ import pytest
 
 from src.models.risk_metrics import (
     compute_capture_ratios,
-    compute_cvar,
+    compute_es,
     compute_risk_summary,
     compute_var,
 )
@@ -26,17 +26,17 @@ class TestVaR:
         assert compute_var(pnl) == pytest.approx(-50.0)
 
 
-class TestCVaR:
+class TestES:
     def test_worse_than_var(self):
         rng = np.random.default_rng(42)
         pnl = rng.normal(0, 100, size=10_000)
         var = compute_var(pnl)
-        cvar = compute_cvar(pnl)
-        assert cvar <= var
+        es = compute_es(pnl)
+        assert es <= var
 
     def test_constant_distribution(self):
         pnl = np.full(1000, 42.0)
-        assert compute_cvar(pnl) == pytest.approx(42.0)
+        assert compute_es(pnl) == pytest.approx(42.0)
 
 
 class TestCaptureRatios:

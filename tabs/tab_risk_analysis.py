@@ -10,7 +10,7 @@ import streamlit as st
 from src.config import COLOUR_PRIMARY, COLOUR_SUCCESS, COLOUR_WARNING, COLOUR_MUTED, PLOTLY_TEMPLATE, RISK_APPETITES, SP_LABELS
 from src.models.kelly import compute_kelly_pnl, run_kelly_analysis
 from src.models.pnl_calculator import compute_pnl_for_position
-from src.models.risk_metrics import compute_cvar
+from src.models.risk_metrics import compute_es
 from src.session_keys import (
     ALL_POSITIONS, BANKROLL, CAPTURE_RATIOS, DA_PRICE,
     KELLY_RESULTS, PARAMS, RESULT, SIZING_METHOD, SIP_MATRIX,
@@ -36,7 +36,7 @@ def render(has_results: bool) -> None:
     params = st.session_state[PARAMS]
 
     # ── Compute metrics for each risk tier ────────────────────────────
-    labels, expected_pnls, cvars, rtr = [], [], [], []
+    labels, expected_pnls, es_values, rtr = [], [], [], []
 
     for tier_label, tier_pct in RISK_APPETITES.items():
         traded = np.percentile(result.delivered_mw, tier_pct, axis=0)
@@ -46,7 +46,7 @@ def render(has_results: bool) -> None:
         )
         labels.append(tier_label)
         expected_pnls.append(float(np.mean(pnl)))
-        cvars.append(compute_cvar(pnl))
+        es_values.append(compute_es(pnl))
         std = float(np.std(pnl))
         rtr.append(float(np.mean(pnl)) / max(std, 1e-9))
 
@@ -54,7 +54,7 @@ def render(has_results: bool) -> None:
     st.subheader("Risk-Return Frontier")
     st.caption("Each point represents a different position-sizing percentile. "
                "Move right for more tail risk, up for higher expected return.")
-    fig_frontier = risk_return_frontier(labels, expected_pnls, cvars)
+    fig_frontier = risk_return_frontier(labels, expected_pnls, es_values)
     st.plotly_chart(fig_frontier, use_container_width=True)
 
     # ── Metrics table ─────────────────────────────────────────────────
@@ -62,7 +62,7 @@ def render(has_results: bool) -> None:
     metrics_df = pd.DataFrame({
         "Tier": labels,
         "Expected P&L (£)": [f"£{v:,.0f}" for v in expected_pnls],
-        "CVaR 95% (£)": [f"£{v:,.0f}" for v in cvars],
+        "ES 95% (£)": [f"£{v:,.0f}" for v in es_values],
         "Reward-to-Risk": [f"{v:.3f}" for v in rtr],
     })
     st.dataframe(metrics_df, use_container_width=True, hide_index=True)

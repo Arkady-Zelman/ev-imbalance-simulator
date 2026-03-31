@@ -19,9 +19,11 @@ except ImportError:
     HAS_JOBLIB = False
 
 from src.models.xgb_trainer import (
+    GRID,
     TrainedXGBModels,
     _build_train_data,
-    _generate_param_combos,
+    _generate_grid_combos,
+    _generate_random_combos,
     _grid_search_single,
     forecast_forward,
     has_trained_models,
@@ -47,17 +49,19 @@ def _make_series(n_days: int = 90, seed: int = 42):
 
 
 class TestParamCombos:
-    def test_count(self):
-        combos = _generate_param_combos()
+    def test_grid_combo_count(self):
+        combos = _generate_grid_combos()
         assert len(combos) == 27
 
-    def test_has_required_keys(self):
-        combos = _generate_param_combos()
+    def test_grid_has_all_grid_keys(self):
+        combos = _generate_grid_combos()
         for c in combos:
-            assert "n_estimators" in c
-            assert "max_depth" in c
-            assert "learning_rate" in c
-            assert "subsample" in c
+            for k in GRID:
+                assert k in c
+
+    def test_random_combo_count(self):
+        assert len(_generate_random_combos(n_samples=30)) == 30
+        assert len(_generate_random_combos(n_samples=5, seed=0)) == 5
 
 
 class TestBuildTrainData:
@@ -90,7 +94,7 @@ class TestGridSearchSingle:
             sip.values.astype(float), 48 * 30, 48,
             mip.values.astype(float), demand.values.astype(float),
         )
-        combos = _generate_param_combos()
+        combos = _generate_grid_combos()
         best_p, best_score = _grid_search_single(X, y, combos)
         assert isinstance(best_p, dict)
         assert best_score >= 0

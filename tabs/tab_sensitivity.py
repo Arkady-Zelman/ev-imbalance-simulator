@@ -8,7 +8,7 @@ import streamlit as st
 
 from src.config import CHARGER_CAPACITY_KW, build_sp_beta_params
 from src.models.monte_carlo import SimulationParams, prepare_sip_matrix, run_simulation
-from src.models.risk_metrics import compute_cvar
+from src.models.risk_metrics import compute_es
 from src.session_keys import DA_PRICE, PARAMS, RESULT, RISK_SUMMARY, SIP_MATRIX
 from src.visualization.charts import (
     diversification_curve,
@@ -17,9 +17,9 @@ from src.visualization.charts import (
 )
 
 
-def _quick_cvar(fleet_size, dispatch_rate, override_rate, risk_pct,
-                sip_matrix, da_price, n_runs=1_000, seed=42):
-    """Helper: run a reduced simulation and return CVaR."""
+def _quick_es(fleet_size, dispatch_rate, override_rate, risk_pct,
+              sip_matrix, da_price, n_runs=1_000, seed=42):
+    """Helper: run a reduced simulation and return ES (95%)."""
     params = SimulationParams(
         fleet_size=fleet_size,
         dispatch_rate=dispatch_rate,
@@ -29,7 +29,7 @@ def _quick_cvar(fleet_size, dispatch_rate, override_rate, risk_pct,
         seed=seed,
     )
     res = run_simulation(params, sip_matrix, da_price=da_price)
-    return compute_cvar(res.daily_pnl)
+    return compute_es(res.daily_pnl)
 
 
 def render(has_results: bool) -> None:
@@ -45,12 +45,12 @@ def render(has_results: bool) -> None:
     da_price = st.session_state[DA_PRICE]
     risk = st.session_state[RISK_SUMMARY]
 
-    base_cvar = risk.cvar_95
+    base_es = risk.es_95
     quick_n = min(1_000, params.n_runs)
 
     # ── Tornado diagram ───────────────────────────────────────────────
-    st.subheader("CVaR Sensitivity (Tornado Diagram)")
-    st.caption("Shows how CVaR changes when each parameter is varied between a low and high scenario, "
+    st.subheader("ES Sensitivity (Tornado Diagram)")
+    st.caption("Shows how Expected Shortfall changes when each parameter is varied between a low and high scenario, "
                "holding all others at their base value.")
 
     with st.spinner("Running sensitivity scenarios…"):
@@ -75,13 +75,13 @@ def render(has_results: bool) -> None:
         for label, key, lo, hi in param_defs:
             kw_lo = {**base_kw, key: lo}
             kw_hi = {**base_kw, key: hi}
-            cvar_lo = _quick_cvar(**kw_lo)
-            cvar_hi = _quick_cvar(**kw_hi)
+            es_lo = _quick_es(**kw_lo)
+            es_hi = _quick_es(**kw_hi)
             names.append(f"{label}\n({lo} → {hi})")
-            lows.append(cvar_lo)
-            highs.append(cvar_hi)
+            lows.append(es_lo)
+            highs.append(es_hi)
 
-    fig_tornado = tornado_diagram(names, lows, highs, base_cvar)
+    fig_tornado = tornado_diagram(names, lows, highs, base_es)
     st.plotly_chart(fig_tornado, use_container_width=True)
 
     # ── Individual parameter sweeps ───────────────────────────────────
@@ -103,7 +103,7 @@ def render(has_results: bool) -> None:
             x_vals = [0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.12, 0.15]
             key = "override_rate"
 
-        y_cvar = []
+        y_es = []
         y_pnl = []
         for v in x_vals:
             kw = {**base_kw, key: v}
@@ -116,7 +116,7 @@ def render(has_results: bool) -> None:
                 seed=42,
             )
             r = run_simulation(p, sip_matrix, da_price=da_price)
-            y_cvar.append(compute_cvar(r.daily_pnl))
+            y_es.append(compute_es(r.daily_pnl))
             y_pnl.append(float(np.mean(r.daily_pnl)))
 
     c1, c2 = st.columns(2)
@@ -125,8 +125,8 @@ def render(has_results: bool) -> None:
                                        title=f"Expected P&L vs {sweep_param}")
         st.plotly_chart(fig_s1, use_container_width=True)
     with c2:
-        fig_s2 = parameter_sweep_chart(x_vals, y_cvar, sweep_param, "CVaR 95% (£)",
-                                       title=f"CVaR vs {sweep_param}")
+        fig_s2 = parameter_sweep_chart(x_vals, y_es, sweep_param, "ES 95% (£)",
+                                       title=f"ES vs {sweep_param}")
         st.plotly_chart(fig_s2, use_container_width=True)
 
     # ── Portfolio diversification effect ──────────────────────────────
