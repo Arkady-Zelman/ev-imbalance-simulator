@@ -1,8 +1,8 @@
 """
-XGBoost-based forecasters for SIP and Demand.
+XGBoost-based forecasters for SIP, MIP, and Demand.
 
-For each forecast origin and horizon, we train a fresh XGBoost model on the
-lookback window (online/rolling fit — no lookahead).  Features include
+For each forecast origin and horizon, a fresh XGBoost model is trained on the
+lookback window (online/rolling fit — no lookahead). Features include
 time-of-day/day-of-week encodings, recent lags, rolling statistics, and
 cross-series interactions.
 
@@ -21,16 +21,30 @@ logger = logging.getLogger(__name__)
 
 try:
     import xgboost as xgb
-
     _HAS_XGB = True
 except ImportError:
     _HAS_XGB = False
     xgb = None  # type: ignore[assignment]
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _cyclical_encode(value: float, period: float) -> tuple[float, float]:
     angle = 2 * np.pi * value / period
     return float(np.sin(angle)), float(np.cos(angle))
+
+
+def _fill_nans(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Impute NaN values with per-column means. Returns (X_filled, col_means).
+    Columns that are entirely NaN are filled with 0.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # silence "mean of empty slice"
+        col_means = np.nanmean(X, axis=0)
+    col_means = np.where(np.isnan(col_means), 0.0, col_means)
+    X = np.where(np.isnan(X), col_means[np.newaxis, :], X)
+    return X, col_means
 
 
 def _build_features(
@@ -42,104 +56,90 @@ def _build_features(
 ) -> Optional[np.ndarray]:
     """
     Build a feature vector for the observation at *idx* predicting *horizon*
-    SPs ahead.  Only uses data at indices < idx (strict walk-forward).
+    SPs ahead. Only uses data at indices < idx (strict walk-forward, no lookahead).
 
-    Returns None if insufficient history.
+    Features
+    --------
+    - Cyclical encoding of current SP-of-day, day-of-week, horizon, target SP-of-day
+    - Lags at 1d / 2d / 7d (48 / 96 / 336 SPs back)
+    - Rolling mean/std/max/min over last 48 SPs (24h window)
+    - Rolling mean/std over last 336 SPs (7d window)
+    - MIP: last value + 24h rolling mean (if provided)
+    - Auxiliary series (demand for SIP; SIP for demand/MIP): lags at 1d/2d + 24h mean + interaction term
+
+    Returns None is not applicable (idx < 0 etc.), but always returns a vector
+    with NaNs for missing entries so the caller can impute.
     """
-    sp_of_day = idx % 48
+    sp_of_day  = idx % 48
     day_of_week = (idx // 48) % 7
 
-    sp_sin, sp_cos = _cyclical_encode(sp_of_day, 48)
-    dow_sin, dow_cos = _cyclical_encode(day_of_week, 7)
-    h_sin, h_cos = _cyclical_encode(horizon % 48, 48)
+    sp_sin, sp_cos    = _cyclical_encode(sp_of_day, 48)
+    dow_sin, dow_cos  = _cyclical_encode(day_of_week, 7)
+    h_sin, h_cos      = _cyclical_encode(horizon % 48, 48)
+    tsp_sin, tsp_cos  = _cyclical_encode((idx + horizon) % 48, 48)
 
-    feats: list[float] = [sp_sin, sp_cos, dow_sin, dow_cos, h_sin, h_cos]
+    feats: list[float] = [sp_sin, sp_cos, dow_sin, dow_cos, h_sin, h_cos, tsp_sin, tsp_cos]
 
-    target_sp = (idx + horizon) % 48
-    tsp_sin, tsp_cos = _cyclical_encode(target_sp, 48)
-    feats.extend([tsp_sin, tsp_cos])
+    # Target lags: 1d / 2d / 7d
+    for off in (48, 96, 336):
+        feats.append(target_values[idx - off] if idx - off >= 0 else np.nan)
 
-    lag_offsets = [48, 96, 336]  # 1d, 2d, 7d
-    for off in lag_offsets:
-        if idx - off >= 0:
-            feats.append(target_values[idx - off])
-        else:
-            feats.append(np.nan)
-
-    same_sp_offsets = [48, 96, 336]
-    for off in same_sp_offsets:
-        look = idx - off
-        if look >= 0:
-            feats.append(target_values[look])
-        else:
-            feats.append(np.nan)
-
-    window_48 = target_values[max(0, idx - 48):idx]
-    if len(window_48) > 0:
-        feats.extend([
-            float(np.nanmean(window_48)),
-            float(np.nanstd(window_48)),
-            float(np.nanmax(window_48)),
-            float(np.nanmin(window_48)),
-        ])
+    # Rolling stats over last 24h
+    w48 = target_values[max(0, idx - 48):idx]
+    if len(w48) > 0:
+        feats += [float(np.nanmean(w48)), float(np.nanstd(w48)),
+                  float(np.nanmax(w48)), float(np.nanmin(w48))]
     else:
-        feats.extend([np.nan, np.nan, np.nan, np.nan])
+        feats += [np.nan, np.nan, np.nan, np.nan]
 
-    window_336 = target_values[max(0, idx - 336):idx]
-    if len(window_336) > 0:
-        feats.extend([float(np.nanmean(window_336)), float(np.nanstd(window_336))])
+    # Rolling stats over last 7d
+    w336 = target_values[max(0, idx - 336):idx]
+    if len(w336) > 0:
+        feats += [float(np.nanmean(w336)), float(np.nanstd(w336))]
     else:
-        feats.extend([np.nan, np.nan])
+        feats += [np.nan, np.nan]
 
+    # MIP features (only meaningful when forecasting SIP)
     if mip_values is not None:
-        if idx > 0:
-            feats.append(float(mip_values[idx - 1]))
-        else:
-            feats.append(np.nan)
-        mip_win = mip_values[max(0, idx - 48):idx]
-        if len(mip_win) > 0:
-            feats.append(float(np.nanmean(mip_win)))
-        else:
-            feats.append(np.nan)
+        feats.append(float(mip_values[idx - 1]) if idx > 0 else np.nan)
+        mip_w = mip_values[max(0, idx - 48):idx]
+        feats.append(float(np.nanmean(mip_w)) if len(mip_w) > 0 else np.nan)
     else:
-        feats.extend([np.nan, np.nan])
+        feats += [np.nan, np.nan]
 
+    # Auxiliary series features (demand when target=SIP/MIP; SIP when target=demand)
     if aux_values is not None:
-        for off in [48, 96]:
-            if idx - off >= 0:
-                feats.append(aux_values[idx - off])
-            else:
-                feats.append(np.nan)
-        aux_win = aux_values[max(0, idx - 48):idx]
-        if len(aux_win) > 0:
-            feats.append(float(np.nanmean(aux_win)))
-        else:
-            feats.append(np.nan)
-        if idx - 48 >= 0 and aux_values is not None:
-            feats.append(target_values[max(0, idx - 48)] * aux_values[max(0, idx - 48)])
+        for off in (48, 96):
+            feats.append(aux_values[idx - off] if idx - off >= 0 else np.nan)
+        aux_w = aux_values[max(0, idx - 48):idx]
+        feats.append(float(np.nanmean(aux_w)) if len(aux_w) > 0 else np.nan)
+        # Interaction: target × aux (both lagged 1d)
+        if idx >= 48:
+            feats.append(float(target_values[idx - 48]) * float(aux_values[idx - 48]))
         else:
             feats.append(np.nan)
     else:
-        feats.extend([np.nan, np.nan, np.nan, np.nan])
+        feats += [np.nan, np.nan, np.nan, np.nan]
 
     return np.array(feats, dtype=np.float32)
 
+
+# ── Default params (used when no tuned params are available) ──────────────────
 
 _DEFAULT_XGB_PARAMS: Dict[str, object] = {
     "n_estimators": 100,
     "max_depth": 5,
     "learning_rate": 0.1,
     "reg_alpha": 0.1,
-    "reg_lambda": 0.1,
+    "reg_lambda": 1.0,
     "subsample": 0.8,
     "colsample_bytree": 0.8,
     "gamma": 0.1,
     "min_child_weight": 5,
-    "max_delta_step": 1,
-    "scale_pos_weight": 5,
-    "base_score": 0.5,
 }
 
+
+# ── Core forecast function ────────────────────────────────────────────────────
 
 def _xgb_forecast(
     sip_values: np.ndarray,
@@ -151,41 +151,38 @@ def _xgb_forecast(
     xgb_params: Optional[Dict[str, object]] = None,
 ) -> Dict[int, float]:
     """
-    XGBoost SIP forecast: trains one model per horizon on the lookback window,
-    then predicts the value at origin + horizon.
+    Train one XGBoost model per horizon on the lookback window and predict
+    the value at origin + horizon. Strict walk-forward: only data before
+    origin_idx is used for training and prediction.
 
     Parameters
     ----------
-    xgb_params : Optional dict of XGBRegressor kwargs. When provided, these
-                 override the hardcoded defaults. Pass tuned params from grid search.
+    sip_values  : Primary target series (may be SIP, MIP, or demand depending on caller).
+    mip_values  : MIP series used as a feature when forecasting SIP.
+    demand_values : Auxiliary series (demand for SIP/MIP targets; SIP for demand target).
+    xgb_params  : Override default XGBRegressor kwargs. Pass tuned params from grid search.
     """
     if not _HAS_XGB:
         logger.warning("xgboost not installed — falling back to TOD mean")
         from src.models.forecaster import _tod_mean_forecast
-
         return _tod_mean_forecast(sip_values, origin_idx, lookback_sps, horizons)
 
-    params = dict(_DEFAULT_XGB_PARAMS)
-    if xgb_params is not None:
-        params.update(xgb_params)
+    params = {**_DEFAULT_XGB_PARAMS, **(xgb_params or {})}
 
     n = len(sip_values)
+    _FEAT_HIST = 48 + 336   # minimum history indices for feature builder
+    _MIN_ROWS  = 30
+
     forecasts: Dict[int, float] = {}
-    _FEATURE_HISTORY = 48 + 336  # minimum indices needed for feature builder
-    _MIN_SAMPLES = 30
 
     for h in horizons:
         if origin_idx + h >= n:
             continue
 
-        min_window = _FEATURE_HISTORY + h + _MIN_SAMPLES
-        effective_lb = max(lookback_sps, min_window)
-        start = max(0, origin_idx - effective_lb)
+        effective_lb = max(lookback_sps, _FEAT_HIST + h + _MIN_ROWS)
+        train_start = max(_FEAT_HIST, origin_idx - effective_lb)
 
-        X_rows: list[np.ndarray] = []
-        y_rows: list[float] = []
-
-        train_start = max(start, _FEATURE_HISTORY)
+        X_rows, y_rows = [], []
         for i in range(train_start, origin_idx):
             if i + h >= origin_idx:
                 break
@@ -200,19 +197,9 @@ def _xgb_forecast(
 
         X = np.vstack(X_rows)
         y = np.array(y_rows, dtype=np.float32)
+        X, col_means = _fill_nans(X)
 
-        nan_mask = np.isnan(X)
-        col_means = np.nanmean(X, axis=0)
-        col_means = np.where(np.isnan(col_means), 0.0, col_means)
-        for c in range(X.shape[1]):
-            X[nan_mask[:, c], c] = col_means[c]
-
-        model = xgb.XGBRegressor(
-            **params,
-            random_state=42,
-            verbosity=0,
-            n_jobs=1,
-        )
+        model = xgb.XGBRegressor(**params, random_state=42, verbosity=0, n_jobs=1)
         model.fit(X, y)
 
         x_pred = _build_features(sip_values, origin_idx, h, mip_values, demand_values)
@@ -224,6 +211,11 @@ def _xgb_forecast(
     return forecasts
 
 
+# ── Target-specific wrappers ──────────────────────────────────────────────────
+# These route the correct series into _xgb_forecast as target vs. auxiliary.
+# _xgb_forecast uses its first argument as the forecast target; the naming
+# reflects the SIP-centric origin of the function.
+
 def _xgb_demand_forecast(
     demand_values: np.ndarray,
     origin_idx: int,
@@ -232,23 +224,19 @@ def _xgb_demand_forecast(
     sip_values: Optional[np.ndarray] = None,
     xgb_params: Optional[Dict[str, object]] = None,
 ) -> Dict[int, float]:
-    """
-    XGBoost demand forecast: trains one model per horizon on the lookback
-    window using demand as target and SIP as auxiliary feature.
-    """
+    """XGBoost demand forecast: demand is target, SIP is auxiliary feature."""
     if not _HAS_XGB:
         logger.warning("xgboost not installed — falling back to TOD mean for demand")
         from src.models.forecaster import _tod_mean_forecast
-
         return _tod_mean_forecast(demand_values, origin_idx, lookback_sps, horizons)
 
     return _xgb_forecast(
-        sip_values=demand_values,
+        sip_values=demand_values,   # target
         origin_idx=origin_idx,
         lookback_sps=lookback_sps,
         horizons=horizons,
         mip_values=None,
-        demand_values=sip_values,
+        demand_values=sip_values,   # aux feature
         xgb_params=xgb_params,
     )
 
@@ -262,22 +250,19 @@ def _xgb_mip_forecast(
     demand_values: Optional[np.ndarray] = None,
     xgb_params: Optional[Dict[str, object]] = None,
 ) -> Dict[int, float]:
-    """
-    XGBoost wholesale (MIP) forecast: trains one model per horizon on the
-    lookback window using MIP as target and SIP + demand as auxiliary features.
-    """
+    """XGBoost MIP (wholesale) forecast: MIP is target, SIP and/or demand are auxiliary."""
     if not _HAS_XGB:
         logger.warning("xgboost not installed — falling back to TOD mean for MIP")
         from src.models.forecaster import _tod_mean_forecast
-
         return _tod_mean_forecast(mip_values, origin_idx, lookback_sps, horizons)
 
+    aux = sip_values if sip_values is not None else demand_values
     return _xgb_forecast(
-        sip_values=mip_values,
+        sip_values=mip_values,      # target
         origin_idx=origin_idx,
         lookback_sps=lookback_sps,
         horizons=horizons,
         mip_values=None,
-        demand_values=sip_values if sip_values is not None else demand_values,
+        demand_values=aux,          # aux feature
         xgb_params=xgb_params,
     )

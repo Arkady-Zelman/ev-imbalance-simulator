@@ -28,6 +28,13 @@ from src.models.rolling_backtest import (
     build_error_matrix,
     run_rolling_backtest,
 )
+from src.models.prophet_trainer import (
+    forecast_forward_np,
+    has_np_models,
+    load_np_models,
+    save_np_models,
+    train_np_models,
+)
 from src.models.xgb_trainer import (
     forecast_forward,
     has_trained_models,
@@ -226,8 +233,127 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
 
+    elif method_key == "neuralprophet":
+        # ── NeuralProphet: full training workflow (mirrors XGBoost) ──────────
+        target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
+        ss_key = f"_np_trained_models_{target_key}"
+
+        st.markdown("---")
+        st.subheader(f"NeuralProphet {target_desc} Model Training")
+        st.caption(
+            f"Train a **{target_desc}** NeuralProphet model, then view results anytime. "
+            "Models are stored separately per target and persist across sessions."
+        )
+
+        col_deep, col_quick, col_show = st.columns(3)
+        with col_deep:
+            np_deep_btn = st.button(
+                f"🏋️ In-Depth Search ({target_desc})",
+                use_container_width=True,
+                type="primary",
+                key="rb_np_deep",
+                help="Systematic 3×3×2 = 18 combos over n_lags, epochs, learning_rate. "
+                     "Takes several minutes. Run periodically for best accuracy.",
+            )
+        with col_quick:
+            np_quick_btn = st.button(
+                f"⚡ Quick Random Search ({target_desc})",
+                use_container_width=True,
+                key="rb_np_quick",
+                help="6 random combos — faster estimate for point-in-time tuning.",
+            )
+        with col_show:
+            np_show_btn = st.button(
+                f"📊 Show {target_desc} Results",
+                use_container_width=True,
+                key="rb_np_show",
+                help=f"Load and display results from the last trained {target_desc} NP model.",
+            )
+
+        np_search_mode = None
+        if np_deep_btn:
+            np_search_mode = "grid"
+        elif np_quick_btn:
+            np_search_mode = "random"
+
+        if np_search_mode is not None:
+            mode_label = "In-depth grid" if np_search_mode == "grid" else "Quick random"
+            with st.spinner("Aligning SIP, MIP and Demand series…"):
+                sip_series, mip_series, demand_series = build_aligned_series(
+                    sip_df, mip_df, demand_df=demand_df,
+                )
+            n_days = len(sip_series) // 48
+            if n_days < 45:
+                st.error(
+                    f"Need at least 45 days of aligned data. "
+                    f"Currently have {n_days} days. Increase the date range."
+                )
+                return
+
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            def _np_progress(frac: float, msg: str) -> None:
+                progress_bar.progress(min(frac, 1.0))
+                status_text.caption(msg)
+
+            trained_np = train_np_models(
+                sip_series, mip_series,
+                demand_series=demand_series,
+                target=target_key,
+                progress_callback=_np_progress,
+                param_search_mode=np_search_mode,
+            )
+            progress_bar.empty()
+            status_text.empty()
+
+            save_np_models(trained_np, target=target_key)
+            st.session_state[ss_key] = trained_np
+
+            _display_np_training_summary(trained_np)
+
+            rb_key_prefix = f"_rb_{target_key}_{method_key}"
+            st.session_state[f"{rb_key_prefix}_errors"] = trained_np.backtest_errors
+            st.session_state[f"{rb_key_prefix}_crossovers"] = trained_np.backtest_crossovers
+            st.session_state["_rb_last_key"] = rb_key_prefix
+            st.success(
+                f"{mode_label} {target_desc} NP training complete — "
+                f"{len(trained_np.backtest_errors)} backtest configurations evaluated. "
+                f"Model saved to disk."
+            )
+
+        if np_show_btn:
+            trained_np = st.session_state.get(ss_key)
+            if trained_np is None:
+                trained_np = load_np_models(target=target_key)
+                if trained_np is not None:
+                    st.session_state[ss_key] = trained_np
+
+            if trained_np is None:
+                st.info(
+                    f"No trained {target_desc} NeuralProphet model found. "
+                    f"Press one of the training buttons first."
+                )
+                return
+
+            import datetime as dt
+            ts = dt.datetime.fromtimestamp(trained_np.training_timestamp)
+            age_hours = (dt.datetime.now() - ts).total_seconds() / 3600
+            st.caption(f"Loaded {target_desc} NP model trained at **{ts:%Y-%m-%d %H:%M}**")
+            if age_hours > 24:
+                st.warning(
+                    f"This NeuralProphet model is **{age_hours:.0f} hours old**. "
+                    "Forecasts may not reflect recent price movements — consider re-training."
+                )
+            _display_np_training_summary(trained_np)
+
+            rb_key_prefix = f"_rb_{target_key}_{method_key}"
+            st.session_state[f"{rb_key_prefix}_errors"] = trained_np.backtest_errors
+            st.session_state[f"{rb_key_prefix}_crossovers"] = trained_np.backtest_crossovers
+            st.session_state["_rb_last_key"] = rb_key_prefix
+
     else:
-        # ── TOD Mean / EWMA / NeuralProphet: standard single-button flow
+        # ── TOD Mean / EWMA: standard single-button flow ──────────────────────
         target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
         run_btn = st.button(
             f"🔬 Run {target_desc} Rolling Backtest ({method})",
@@ -594,7 +720,7 @@ def _render_rolling_backtest_body() -> None:
 
 
 def _display_training_summary(trained) -> None:
-    """Show a compact summary of best params from grid search."""
+    """Show a compact summary of XGBoost best params from grid search."""
     summary_rows = []
     for lb_label in trained.best_params:
         for h_sps, params in trained.best_params[lb_label].items():
@@ -609,12 +735,31 @@ def _display_training_summary(trained) -> None:
                 "Worst-Window MAE": f"{score:.2f}" if score != float("inf") else "N/A",
             })
     if summary_rows:
-        with st.expander("Grid Search Results — Best Params per (Lookback, Horizon)"):
+        with st.expander("Grid Search Results — Best XGBoost Params per (Lookback, Horizon)"):
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+
+def _display_np_training_summary(trained) -> None:
+    """Show a compact summary of NeuralProphet best params from grid search."""
+    summary_rows = []
+    for lb_label, params in trained.best_params.items():
+        score = trained.best_scores.get(lb_label, float("nan"))
+        n_fwd = len(trained.forward_forecasts.get(lb_label, {}))
+        summary_rows.append({
+            "Lookback": lb_label,
+            "n_lags": params.get("n_lags"),
+            "epochs": params.get("epochs"),
+            "learning_rate": params.get("learning_rate"),
+            "Worst-Window MAE": f"{score:.2f}" if score not in (float("inf"), float("nan")) else "N/A",
+            "Forward Forecast Days": n_fwd,
+        })
+    if summary_rows:
+        with st.expander("NeuralProphet Grid Search — Best Params per Lookback"):
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
 
 def _render_forward_forecast() -> None:
-    """Show 14-day forward forecast from trained XGBoost models (SIP and/or Demand)."""
+    """Show 14-day forward forecasts from trained XGBoost and/or NeuralProphet models."""
     sip_df = st.session_state.get(SIP_DF)
     mip_df = st.session_state.get(MIP_DF)
     demand_df = st.session_state.get(DEMAND_DF)
@@ -622,15 +767,22 @@ def _render_forward_forecast() -> None:
     if sip_df is None or sip_df.empty or mip_df is None or mip_df.empty:
         return
 
-    trained_sip = st.session_state.get("_xgb_trained_models_sip")
-    trained_mip = st.session_state.get("_xgb_trained_models_mip")
-    trained_demand = st.session_state.get("_xgb_trained_models_demand")
+    # Collect all available trained models (XGBoost + NeuralProphet)
+    xgb_models = {
+        "Price (SIP)":      (st.session_state.get("_xgb_trained_models_sip"),    "£/MWh", "Predicted SIP (£/MWh)"),
+        "Wholesale (MIP)":  (st.session_state.get("_xgb_trained_models_mip"),    "£/MWh", "Predicted MIP (£/MWh)"),
+        "Demand":           (st.session_state.get("_xgb_trained_models_demand"), "MW",    "Predicted Demand (MW)"),
+    }
+    np_models = {
+        "Price (SIP)":      (st.session_state.get("_np_trained_models_sip"),     "£/MWh", "Predicted SIP (£/MWh)"),
+        "Wholesale (MIP)":  (st.session_state.get("_np_trained_models_mip"),     "£/MWh", "Predicted MIP (£/MWh)"),
+        "Demand":           (st.session_state.get("_np_trained_models_demand"),  "MW",    "Predicted Demand (MW)"),
+    }
 
-    has_any = any(
-        t is not None and t.final_models
-        for t in [trained_sip, trained_mip, trained_demand]
-    )
-    if not has_any:
+    has_xgb = any(t is not None and t.final_models for t, _, _ in xgb_models.values())
+    has_np  = any(t is not None and t.forward_forecasts for t, _, _ in np_models.values())
+
+    if not has_xgb and not has_np:
         return
 
     from src.models.forecaster import build_aligned_series
@@ -638,55 +790,69 @@ def _render_forward_forecast() -> None:
     sip_series, mip_series, demand_series = build_aligned_series(
         sip_df, mip_df, demand_df=demand_df,
     )
-
-    sip_values = sip_series.values.astype(float)
-    mip_values = mip_series.values.astype(float)
+    sip_values    = sip_series.values.astype(float)
+    mip_values    = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series is not None else None
+    last_date     = sip_series.index[-1]
 
-    last_date = sip_series.index[-1]
     lb_colours = {
-        "1 day": COLOUR_PRIMARY,
+        "1 day":  COLOUR_PRIMARY,
         "5 days": COLOUR_MUTED,
         "15 days": COLOUR_WARNING,
         "30 days": COLOUR_SUCCESS,
     }
 
     st.markdown("---")
-    st.subheader("6. 14-Day Forward Forecast (XGBoost)")
+    st.subheader("6. 14-Day Forward Forecast")
     st.caption(
         "Point forecasts from the latest data point using trained models. "
-        "Price and Demand models are shown separately when available."
+        "XGBoost and NeuralProphet forecasts are shown side-by-side when both are available."
     )
 
-    for trained, label, unit, y_label in [
-        (trained_sip, "Price (SIP)", "£/MWh", "Predicted SIP (£/MWh)"),
-        (trained_mip, "Wholesale (MIP)", "£/MWh", "Predicted MIP (£/MWh)"),
-        (trained_demand, "Demand", "MW", "Predicted Demand (MW)"),
-    ]:
-        if trained is None or not trained.final_models:
+    labels_shown = set()
+    for label in ["Price (SIP)", "Wholesale (MIP)", "Demand"]:
+        xgb_trained, unit, y_label = xgb_models[label]
+        np_trained,  _,    _       = np_models[label]
+
+        xgb_fc = forecast_forward(xgb_trained, sip_values, mip_values, demand_values, n_days=14) \
+                 if xgb_trained is not None and xgb_trained.final_models else {}
+        np_fc  = forecast_forward_np(np_trained) \
+                 if np_trained is not None and np_trained.forward_forecasts else {}
+
+        if not xgb_fc and not np_fc:
             continue
 
-        forecasts = forecast_forward(
-            trained, sip_values, mip_values, demand_values, n_days=14,
-        )
-        if not forecasts:
-            continue
-
+        labels_shown.add(label)
         fig = go.Figure()
-        for lb_label, day_forecasts in forecasts.items():
+
+        for lb_label, day_forecasts in xgb_fc.items():
             if not day_forecasts:
                 continue
-            days = sorted(day_forecasts.keys())
-            dates = [last_date + pd.Timedelta(days=d) for d in days]
-            values = [day_forecasts[d] for d in days]
+            days   = sorted(day_forecasts.keys())
+            dates  = [last_date + pd.Timedelta(days=d) for d in days]
+            vals   = [day_forecasts[d] for d in days]
             colour = lb_colours.get(lb_label, COLOUR_MUTED)
-
             fig.add_trace(go.Scatter(
-                x=dates, y=values,
+                x=dates, y=vals,
                 mode="lines+markers",
-                name=f"{lb_label} lookback",
+                name=f"XGB {lb_label}",
                 line=dict(color=colour, width=2),
                 marker=dict(size=6),
+            ))
+
+        for lb_label, day_forecasts in np_fc.items():
+            if not day_forecasts:
+                continue
+            days   = sorted(day_forecasts.keys())
+            dates  = [last_date + pd.Timedelta(days=d) for d in days]
+            vals   = [day_forecasts[d] for d in days]
+            colour = lb_colours.get(lb_label, COLOUR_MUTED)
+            fig.add_trace(go.Scatter(
+                x=dates, y=vals,
+                mode="lines+markers",
+                name=f"NP {lb_label}",
+                line=dict(color=colour, width=2, dash="dot"),
+                marker=dict(size=5, symbol="diamond"),
             ))
 
         fig.update_layout(
@@ -699,11 +865,20 @@ def _render_forward_forecast() -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
 
+        # Combined data table
         fc_rows = []
-        for lb_label, day_forecasts in forecasts.items():
+        for lb_label, day_forecasts in xgb_fc.items():
             for d in sorted(day_forecasts.keys()):
                 fc_rows.append({
-                    "Lookback": lb_label,
+                    "Model": f"XGBoost ({lb_label})",
+                    "Day Ahead": d,
+                    "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
+                    f"Forecast ({unit})": f"{day_forecasts[d]:.2f}",
+                })
+        for lb_label, day_forecasts in np_fc.items():
+            for d in sorted(day_forecasts.keys()):
+                fc_rows.append({
+                    "Model": f"NeuralProphet ({lb_label})",
                     "Day Ahead": d,
                     "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
                     f"Forecast ({unit})": f"{day_forecasts[d]:.2f}",

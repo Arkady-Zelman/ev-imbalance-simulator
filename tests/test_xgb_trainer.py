@@ -1,8 +1,25 @@
 """Tests for XGBoost grid-search trainer and disk persistence."""
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
+
+# Stub for run_rolling_backtest so training tests don't run the full backtest
+_EMPTY_BACKTEST = ([], [])
+
+
+def _fast_train(sip, mip, demand=None, target="sip", n_combos=3):
+    """Call train_xgb_models with minimal combos and mocked backtest."""
+    with patch("src.models.xgb_trainer.run_rolling_backtest", return_value=_EMPTY_BACKTEST):
+        return __import__("src.models.xgb_trainer", fromlist=["train_xgb_models"]).train_xgb_models(
+            sip, mip,
+            demand_series=demand,
+            target=target,
+            param_search_mode="random",
+            random_search_samples=n_combos,
+        )
 
 try:
     import xgboost  # noqa: F401
@@ -51,7 +68,8 @@ def _make_series(n_days: int = 90, seed: int = 42):
 class TestParamCombos:
     def test_grid_combo_count(self):
         combos = _generate_grid_combos()
-        assert len(combos) == 27
+        # In-depth mode now uses 150 random samples over the full GRID
+        assert len(combos) == 150
 
     def test_grid_has_all_grid_keys(self):
         combos = _generate_grid_combos()
@@ -105,16 +123,16 @@ class TestGridSearchSingle:
 class TestTrainXGBModels:
     def test_full_pipeline(self):
         sip, mip, demand = _make_series(90)
-        trained = train_xgb_models(sip, mip, demand_series=demand)
+        trained = _fast_train(sip, mip, demand)
         assert isinstance(trained, TrainedXGBModels)
         assert trained.training_timestamp > 0
         assert len(trained.best_params) > 0
-        assert len(trained.backtest_errors) >= 0
-        assert len(trained.backtest_crossovers) >= 0
+        # backtest mocked so errors = []
+        assert isinstance(trained.backtest_errors, list)
 
     def test_has_final_models(self):
         sip, mip, demand = _make_series(90)
-        trained = train_xgb_models(sip, mip, demand_series=demand)
+        trained = _fast_train(sip, mip, demand)
         total_models = sum(len(v) for v in trained.final_models.values())
         assert total_models > 0
 
@@ -123,7 +141,7 @@ class TestTrainXGBModels:
 class TestForecastForward:
     def test_returns_forecasts(self):
         sip, mip, demand = _make_series(90)
-        trained = train_xgb_models(sip, mip, demand_series=demand)
+        trained = _fast_train(sip, mip, demand)
         forecasts = forecast_forward(
             trained,
             sip.values.astype(float),
@@ -144,11 +162,10 @@ class TestForecastForward:
 class TestDiskPersistence:
     def test_save_and_load_sip(self, tmp_path, monkeypatch):
         import src.models.xgb_trainer as trainer_mod
-
         monkeypatch.setattr(trainer_mod, "_CACHE_DIR", tmp_path)
 
         sip, mip, demand = _make_series(90)
-        trained = train_xgb_models(sip, mip, demand_series=demand, target="sip")
+        trained = _fast_train(sip, mip, demand, target="sip")
 
         assert save_trained_models(trained, target="sip")
         assert has_trained_models(target="sip")
@@ -162,11 +179,10 @@ class TestDiskPersistence:
 
     def test_save_and_load_demand(self, tmp_path, monkeypatch):
         import src.models.xgb_trainer as trainer_mod
-
         monkeypatch.setattr(trainer_mod, "_CACHE_DIR", tmp_path)
 
         sip, mip, demand = _make_series(90)
-        trained = train_xgb_models(sip, mip, demand_series=demand, target="demand")
+        trained = _fast_train(sip, mip, demand, target="demand")
 
         assert save_trained_models(trained, target="demand")
         assert has_trained_models(target="demand")
@@ -177,12 +193,11 @@ class TestDiskPersistence:
 
     def test_separate_files(self, tmp_path, monkeypatch):
         import src.models.xgb_trainer as trainer_mod
-
         monkeypatch.setattr(trainer_mod, "_CACHE_DIR", tmp_path)
 
         sip, mip, demand = _make_series(90)
-        trained_sip = train_xgb_models(sip, mip, demand_series=demand, target="sip")
-        trained_dem = train_xgb_models(sip, mip, demand_series=demand, target="demand")
+        trained_sip = _fast_train(sip, mip, demand, target="sip")
+        trained_dem = _fast_train(sip, mip, demand, target="demand")
 
         save_trained_models(trained_sip, target="sip")
         save_trained_models(trained_dem, target="demand")
@@ -190,8 +205,6 @@ class TestDiskPersistence:
         loaded_sip = load_trained_models(target="sip")
         loaded_dem = load_trained_models(target="demand")
 
-        assert loaded_sip is not None
-        assert loaded_dem is not None
-        assert loaded_sip.target == "sip"
-        assert loaded_dem.target == "demand"
+        assert loaded_sip is not None and loaded_sip.target == "sip"
+        assert loaded_dem is not None and loaded_dem.target == "demand"
         assert loaded_sip.training_timestamp != loaded_dem.training_timestamp

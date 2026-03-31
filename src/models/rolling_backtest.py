@@ -77,6 +77,7 @@ def run_rolling_backtest(
     target: str = "sip",
     demand_series: Optional[pd.Series] = None,
     xgb_params: Optional[Dict] = None,
+    np_params: Optional[Dict] = None,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
     """
     Run the full rolling backtest across all lookback × horizon combos.
@@ -86,9 +87,11 @@ def run_rolling_backtest(
 
     Parameters
     ----------
-    target : "sip" (default) or "demand" — which series to forecast.
-    demand_series : Half-hourly demand, used as feature (target=sip) or
+    target : "sip", "demand", or "mip" — which series to forecast.
+    demand_series : Half-hourly demand, used as feature (target=sip/mip) or
                     forecast target (target=demand).
+    xgb_params : Optional XGBRegressor kwargs for method="xgb".
+    np_params  : Optional NeuralProphet constructor kwargs for method="neuralprophet".
 
     Returns
     -------
@@ -159,7 +162,7 @@ def run_rolling_backtest(
                         )
                 elif method == "neuralprophet":
                     from src.models.prophet_forecaster import _neuralprophet_forecast
-                    fc = _neuralprophet_forecast(target_values, idx, lb_sps, [h_sps])
+                    fc = _neuralprophet_forecast(target_values, idx, lb_sps, [h_sps], np_params=np_params)
                 elif method == "ewma":
                     fc = _ewma_forecast(target_values, idx, lb_sps, [h_sps], alpha=ewma_alpha)
                 else:
@@ -191,9 +194,14 @@ def run_rolling_backtest(
             market_mae = float(np.mean(mkt_arr))
             market_rmse = float(np.sqrt(np.mean(mkt_arr ** 2)))
 
+            # MAPE: cap individual values at 500% to avoid blowup from near-zero/negative SIP.
+            # SIP can be negative (reverse cash-out), so MAPE is treated as indicative only;
+            # MAE is the primary metric for this application.
             safe_real = np.where(np.abs(real_arr) < 1e-6, 1e-6, real_arr)
-            forecast_mape = float(np.mean(fc_arr / np.abs(safe_real)) * 100)
-            market_mape = float(np.mean(mkt_arr / np.abs(safe_real)) * 100)
+            fc_pct  = np.minimum(fc_arr  / np.abs(safe_real) * 100, 500.0)
+            mkt_pct = np.minimum(mkt_arr / np.abs(safe_real) * 100, 500.0)
+            forecast_mape = float(np.mean(fc_pct))
+            market_mape   = float(np.mean(mkt_pct))
 
             _, dm_p = diebold_mariano(fc_arr, mkt_arr, h=max(1, h_days), power=2)
 
