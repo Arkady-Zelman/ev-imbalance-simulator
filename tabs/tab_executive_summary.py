@@ -49,6 +49,7 @@ def render(has_results: bool) -> None:
         st.metric("Reward-to-Risk", f"{risk.reward_to_risk:.2f}",
                    help="Mean(P&L) / Std(P&L) — within-day signal-to-noise ratio, not a true Sharpe")
 
+
     # ── Traffic-light risk indicator ──────────────────────────────────
     st.markdown("---")
     st.subheader("Risk Status")

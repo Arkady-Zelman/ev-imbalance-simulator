@@ -94,6 +94,7 @@ url = "https://data.elexon.co.uk/bmrs/api/v1/demand/outturn"
 params = {"settlementDateFrom": "2025-12-01", "settlementDateTo": "2025-12-02", "format": "json"}
 response = requests.get(url, params=params)
 data = response.json()["data"]
+
 """, language="python")
 
     # ── Data freshness ────────────────────────────────────────────────
@@ -101,19 +102,19 @@ data = response.json()["data"]
         st.markdown("---")
         st.subheader("Data Freshness")
         from src.data.elexon_client import sip_cache_timestamp, mip_cache_timestamp
-        df = st.session_state[DATE_FROM]
+        date_f = st.session_state[DATE_FROM]
         dt_to = st.session_state[DATE_TO]
-        sip_ts = sip_cache_timestamp(df, dt_to)
-        mip_ts = mip_cache_timestamp(df, dt_to)
+        sip_ts = sip_cache_timestamp(date_f, dt_to)
+        mip_ts = mip_cache_timestamp(date_f, dt_to)
 
         freshness = []
-        for name, ts in [("SIP", sip_ts), ("Market Index", mip_ts)]:
+        for name, ts in [("SIP", sip_ts), ("Market Index / MIP (APXMIDP)", mip_ts)]:
             if ts:
                 fetched = dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
             else:
                 fetched = "Not cached (fetched live)"
             freshness.append({"Dataset": name, "Last Fetched": fetched,
-                              "Date Range": f"{df} → {dt_to}"})
+                              "Date Range": f"{date_f} → {dt_to}"})
         st.dataframe(pd.DataFrame(freshness), use_container_width=True, hide_index=True)
 
     # ── 2. Fallback / Dummy Data ──────────────────────────────────────
@@ -485,7 +486,7 @@ forecast horizons.
 |-------|------------|
 | **TOD Mean** | For each target SP, average the same half-hour-of-day values over the lookback window |
 | **EWMA** | Exponentially weighted average of same-SP-of-day values, recent data weighted more |
-| **Market (MIP)** | TOD-mean of MIP over the lookback window (not a stale spot price) |
+| **Market (MIP/APXMIDP)** | TOD-mean of APXMIDP (EPEX SPOT, successor to N2EX in GB) over the lookback window |
 
 **Alpha Calculation:**
 ```
@@ -507,7 +508,7 @@ the lookback × horizon grid.
         {"Component": "SIP prices (empirical bootstrap)", "Source": "ELEXON API (live)", "Hardcoded?": "No"},
         {"Component": "MIP prices", "Source": "ELEXON API (live)", "Hardcoded?": "No"},
         {"Component": "SIP regime-switching params", "Source": "Fitted from ELEXON data", "Hardcoded?": "No (fallback defaults exist)"},
-        {"Component": "DA price suggestion", "Source": "Derived from MIP mean", "Hardcoded?": "No (user-overridable)"},
+        {"Component": "DA price suggestion", "Source": "Mean APXMIDP (MIP) over fetched date range", "Hardcoded?": "No (user-overridable)"},
         {"Component": "Fleet plug-in rate profiles", "Source": "CrowdFlex-inspired estimates", "Hardcoded?": "Defaults — configurable via sidebar"},
         {"Component": "Day-type multipliers", "Source": "Estimated (no public data)", "Hardcoded?": "Defaults — configurable via sidebar"},
         {"Component": "Seasonal monthly factors", "Source": "Estimated (no public data)", "Hardcoded?": "Defaults — configurable via sidebar"},
@@ -542,9 +543,10 @@ the lookback × horizon grid.
   intraday. In practice, the desk would buy back volume if plug-in rates disappoint.
 - **Charge cost not modelled:** The cost of overnight catch-up charging is not subtracted from
   P&L. This would reduce net P&L but not affect relative risk comparisons.
-- **MIP as forward proxy:** The Market Index Price is used as the market's forward view.
-  The true forward curve would be derived from DA auction prices or intraday continuous market.
-  MIP is the best publicly available proxy.
+- **Market benchmark:** APXMIDP (EPEX SPOT, which replaced N2EX in the GB power exchange in 2023)
+  is the best available market reference price via the public ELEXON API. True day-ahead auction
+  clearing prices (DAOP) are not available without a commercial data subscription. The TOD-mean
+  of APXMIDP is used as the benchmark at all forecast horizons.
 - **Copula decay is not fitted:** The correlation decay parameter (default 0.3) is an assumption,
   not calibrated from historical plug-in data.
 - **Forecasters are intentionally simple:** TOD Mean and EWMA are baselines. More sophisticated

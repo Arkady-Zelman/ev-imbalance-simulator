@@ -29,7 +29,7 @@ from src.config import (
     SIP_STRESS_DISPATCH_PENALTY,
     SIP_STRESS_PLUGIN_FACTOR,
 )
-from src.data.elexon_client import fetch_demand_outturn, fetch_market_index, fetch_system_prices
+from src.data.elexon_client import fetch_demand_outturn, fetch_generation_outturn, fetch_market_index, fetch_system_prices
 from src.models.kelly import kelly_optimal_position, run_kelly_analysis
 from src.models.monte_carlo import SimulationParams, prepare_sip_matrix, run_simulation
 from src.models.risk_metrics import compute_capture_ratios, compute_risk_summary
@@ -48,6 +48,7 @@ from src.session_keys import (
     DATE_FROM,
     DATE_TO,
     DEMAND_DF,
+    GEN_DF,
     KELLY_RESULTS,
     MIP_DF,
     PARAMS,
@@ -334,10 +335,11 @@ with st.sidebar:
 # ── Run simulation on button click ────────────────────────────────────────
 
 if run_clicked:
-    with st.spinner("Fetching ELEXON market data (SIP + MIP + Demand)…"):
+    with st.spinner("Fetching ELEXON market data (SIP + MIP + Demand + Generation)…"):
         sip_df = fetch_system_prices(date_from, date_to)
         mip_df = fetch_market_index(date_from, date_to)
         demand_df = fetch_demand_outturn(date_from, date_to)
+        gen_df = fetch_generation_outturn(date_from, date_to)
 
     if sip_df.empty:
         st.error("No SIP data returned from ELEXON. Check your date range or network connection.")
@@ -347,7 +349,7 @@ if run_clicked:
     mip_derived_da = derive_da_price_from_mip(mip_df)
     if mip_derived_da is not None and abs(da_price - DEFAULT_DA_PRICE) < 0.01:
         st.info(
-            f"**Auto-derived DA price:** Mean MIP over your date range is "
+            f"**Auto-derived DA price:** Mean MIP (EPEX SPOT/APXMIDP) over your date range is "
             f"**£{mip_derived_da}/MWh** (your setting: £{da_price}/MWh). "
             f"Consider updating the DA price input to match."
         )
@@ -434,6 +436,7 @@ if run_clicked:
     st.session_state[SIZING_METHOD] = sizing_method
     st.session_state[BANKROLL] = bankroll
     st.session_state[DEMAND_DF] = demand_df
+    st.session_state[GEN_DF] = gen_df
     st.session_state[KELLY_RESULTS] = kelly_results
 
 # ── Tab routing ───────────────────────────────────────────────────────────
@@ -449,6 +452,7 @@ from tabs.tab_data_sources import render as render_data_sources
 from tabs.tab_backtesting import render as render_backtesting
 from tabs.tab_rolling_backtest import render as render_rolling_bt
 from tabs.tab_allocation import render as render_allocation
+from tabs.tab_dispatch_engine import render as render_dispatch
 
 tabs = st.tabs([
     "📊 Executive Summary",
@@ -461,6 +465,7 @@ tabs = st.tabs([
     "🔮 Forecast Backtesting",
     "📉 Rolling Backtest",
     "⚖️ Allocation Optimizer",
+    "🎯 Dispatch Engine",
     "📚 Data Sources & Methodology",
 ])
 
@@ -487,4 +492,6 @@ with tabs[8]:
 with tabs[9]:
     render_allocation(has_results)
 with tabs[10]:
+    render_dispatch(has_results)
+with tabs[11]:
     render_data_sources()

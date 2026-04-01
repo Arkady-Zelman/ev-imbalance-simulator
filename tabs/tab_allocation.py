@@ -81,7 +81,7 @@ def _render_allocation_body(result) -> None:
         return
 
     # ── Build aligned series and forecasts ────────────────────────────
-    sip_series, mip_series, demand_series = build_aligned_series(
+    sip_series, mip_series, demand_series, _ = build_aligned_series(
         sip_df, mip_df, demand_df=demand_df,
     )
     sip_values = sip_series.values.astype(float)

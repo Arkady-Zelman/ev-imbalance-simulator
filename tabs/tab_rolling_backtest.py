@@ -42,7 +42,8 @@ from src.models.xgb_trainer import (
     save_trained_models,
     train_xgb_models,
 )
-from src.session_keys import DEMAND_DF, MIP_DF, SIP_DF
+from src.models.dispatch_engine import process_generation_outturn
+from src.session_keys import DEMAND_DF, GEN_DF, MIP_DF, SIP_DF
 
 
 def render(has_results: bool) -> None:
@@ -73,8 +74,13 @@ def _render_rolling_backtest_body() -> None:
     sip_df = st.session_state[SIP_DF]
     mip_df = st.session_state[MIP_DF]
     demand_df = st.session_state.get(DEMAND_DF)
+    gen_df_raw = st.session_state.get(GEN_DF)
 
     has_demand = demand_df is not None and not demand_df.empty
+    has_gen = gen_df_raw is not None and not gen_df_raw.empty
+
+    # Pre-process generation breakdown once (lightweight pivot)
+    gen_breakdown = process_generation_outturn(gen_df_raw) if has_gen else None
 
     # ── Configuration ─────────────────────────────────────────────────
     st.subheader("Configuration")
@@ -83,6 +89,8 @@ def _render_rolling_backtest_body() -> None:
         target_options = ["Price (SIP)", "Wholesale (MIP)"]
         if has_demand:
             target_options.append("Demand")
+        if has_gen:
+            target_options.extend(["Total Generation", "Wind"])
         target_label = st.radio(
             "Forecast target",
             target_options,
@@ -93,6 +101,8 @@ def _render_rolling_backtest_body() -> None:
             "Price (SIP)": "sip",
             "Wholesale (MIP)": "mip",
             "Demand": "demand",
+            "Total Generation": "total_generation",
+            "Wind": "wind",
         }[target_label]
     with col2:
         method_options = ["TOD Mean", "EWMA", "XGBoost", "NeuralProphet"]
@@ -118,10 +128,28 @@ def _render_rolling_backtest_body() -> None:
     if target_key == "demand" and not has_demand:
         st.warning("No demand data available. Run a simulation with demand data first.")
         return
+    if target_key in ("total_generation", "wind") and not has_gen:
+        st.warning("No generation data available. Run a simulation first.")
+        return
+
+    _TARGET_DESC = {
+        "sip": "Price (SIP)",
+        "mip": "Wholesale (MIP)",
+        "demand": "Demand",
+        "total_generation": "Total Generation",
+        "wind": "Wind",
+    }
+
+    # Build gen/wind pd.Series aligned to breakdown index (if available)
+    gen_series_rb: pd.Series | None = None
+    wind_series_rb: pd.Series | None = None
+    if gen_breakdown is not None:
+        gen_series_rb  = pd.Series(gen_breakdown.total_mw, index=gen_breakdown.index)
+        wind_series_rb = pd.Series(gen_breakdown.wind_mw,  index=gen_breakdown.index)
 
     # ── XGBoost: Train / Show Results workflow ────────────────────────
     if method_key == "xgb":
-        target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
+        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
         ss_key = f"_xgb_trained_models_{target_key}"
 
         st.markdown("---")
@@ -166,7 +194,7 @@ def _render_rolling_backtest_body() -> None:
         if search_mode is not None:
             mode_label = "In-depth grid" if search_mode == "grid" else "Quick random"
             with st.spinner("Aligning SIP, MIP and Demand series…"):
-                sip_series, mip_series, demand_series = build_aligned_series(
+                sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
             n_days = len(sip_series) // 48
@@ -190,6 +218,8 @@ def _render_rolling_backtest_body() -> None:
                 target=target_key,
                 progress_callback=_progress,
                 param_search_mode=search_mode,
+                gen_series=gen_series_rb,
+                wind_series=wind_series_rb,
             )
             progress_bar.empty()
             status_text.empty()
@@ -235,7 +265,7 @@ def _render_rolling_backtest_body() -> None:
 
     elif method_key == "neuralprophet":
         # ── NeuralProphet: full training workflow (mirrors XGBoost) ──────────
-        target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
+        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
         ss_key = f"_np_trained_models_{target_key}"
 
         st.markdown("---")
@@ -279,7 +309,7 @@ def _render_rolling_backtest_body() -> None:
         if np_search_mode is not None:
             mode_label = "In-depth grid" if np_search_mode == "grid" else "Quick random"
             with st.spinner("Aligning SIP, MIP and Demand series…"):
-                sip_series, mip_series, demand_series = build_aligned_series(
+                sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
             n_days = len(sip_series) // 48
@@ -354,7 +384,7 @@ def _render_rolling_backtest_body() -> None:
 
     else:
         # ── TOD Mean / EWMA: standard single-button flow ──────────────────────
-        target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target_key, "Price")
+        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
         run_btn = st.button(
             f"🔬 Run {target_desc} Rolling Backtest ({method})",
             use_container_width=True,
@@ -364,7 +394,7 @@ def _render_rolling_backtest_body() -> None:
 
         if run_btn:
             with st.spinner("Aligning SIP, MIP and Demand series…"):
-                sip_series, mip_series, demand_series = build_aligned_series(
+                sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
 
@@ -391,6 +421,8 @@ def _render_rolling_backtest_body() -> None:
                     ewma_alpha=ewma_alpha,
                     target=target_key,
                     demand_series=demand_series,
+                    gen_series=gen_series_rb,
+                    wind_series=wind_series_rb,
                 )
 
             rb_key_prefix = f"_rb_{target_key}_{method_key}"
@@ -409,7 +441,8 @@ def _render_rolling_backtest_body() -> None:
     crossovers = st.session_state[f"{rb_key_prefix}_crossovers"]
 
     is_demand = rb_key_prefix and "_demand_" in rb_key_prefix
-    unit = "MW" if is_demand else "£/MWh"
+    is_gen = rb_key_prefix and ("_total_generation_" in rb_key_prefix or "_wind_" in rb_key_prefix)
+    unit = "MW" if (is_demand or is_gen) else "£/MWh"
     is_mip = rb_key_prefix and "_mip_" in rb_key_prefix
 
     if not errors:
@@ -787,7 +820,7 @@ def _render_forward_forecast() -> None:
 
     from src.models.forecaster import build_aligned_series
 
-    sip_series, mip_series, demand_series = build_aligned_series(
+    sip_series, mip_series, demand_series, _ = build_aligned_series(
         sip_df, mip_df, demand_df=demand_df,
     )
     sip_values    = sip_series.values.astype(float)

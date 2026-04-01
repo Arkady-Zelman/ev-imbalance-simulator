@@ -3,7 +3,13 @@ Client for the ELEXON Insights API (public, no key required).
 
 Endpoints used:
   - System Imbalance Prices (SIP): /system-prices/{date}
-  - Market Index Price: /market-index?from=...&to=...
+  - Market Index Price (APXMIDP / EPEX SPOT): /market-index?from=...&to=...
+  - Demand Outturn (INDO/ITSDO): /demand/outturn
+
+Note on day-ahead prices: the DAOP dataset (N2EX/EPEX day-ahead auction
+clearing prices) is not available on the public ELEXON API.  APXMIDP (MIP)
+is the best publicly available proxy — it is the EPEX SPOT near-delivery
+price, which replaced N2EX in the GB power exchange in 2023.
 """
 
 from __future__ import annotations
@@ -254,3 +260,83 @@ def sip_cache_timestamp(date_from: dt.date, date_to: dt.date) -> Optional[float]
 
 def mip_cache_timestamp(date_from: dt.date, date_to: dt.date) -> Optional[float]:
     return cache_manager.cache_timestamp(f"mip_{date_from}_{date_to}")
+
+
+# ── GB Generation Outturn by Fuel Type (FUELHH) ────────────────────────────
+
+def _fetch_fuelhh_chunk(dt_from: dt.datetime, dt_to: dt.datetime) -> List[Dict]:
+    """Fetch half-hourly generation by fuel type for a date range."""
+    url = f"{ELEXON_BASE_URL}/datasets/FUELHH"
+    params = {
+        "settlementDateFrom": dt_from.strftime("%Y-%m-%d"),
+        "settlementDateTo":   dt_to.strftime("%Y-%m-%d"),
+        "format": "json",
+    }
+    try:
+        logger.info("GET %s  from=%s  to=%s", url, params["settlementDateFrom"], params["settlementDateTo"])
+        resp = _SESSION.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+        records = payload.get("data", []) if isinstance(payload, dict) else payload
+        logger.info("  → %d FUELHH records (HTTP %d)", len(records), resp.status_code)
+        return records
+    except requests.RequestException as exc:
+        logger.warning("FUELHH fetch failed (%s → %s): %s", dt_from, dt_to, exc)
+        return []
+    except ValueError as exc:
+        logger.warning("FUELHH JSON parse failed (%s → %s): %s", dt_from, dt_to, exc)
+        return []
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def fetch_generation_outturn(date_from: dt.date, date_to: dt.date) -> pd.DataFrame:
+    """
+    Fetch half-hourly GB generation outturn by fuel type (FUELHH dataset).
+
+    Returns a long-format DataFrame with columns:
+      settlementDate, settlementPeriod, fuelType, generation (MW)
+
+    Fuel types include:
+      Thermal:       CCGT, COAL, OCGT, OIL, NUCLEAR, BIOMASS, OTHER
+      Renewable:     WIND  (embedded solar is NOT metered in this dataset)
+      Storage:       PS (pumped storage), NPSHYD (non-pumped hydro)
+      Interconnects: INTFR, INTNED, INTIRL, INTNEM, INTNSL, INTVKL,
+                     INTIFA2, INTEW, INTGRNL, INTELEC
+    """
+    cache_key = f"fuelhh_{date_from}_{date_to}"
+    cached = cache_manager.get(cache_key, CACHE_TTL_SECONDS)
+    if cached is not None:
+        logger.info("FUELHH cache hit for %s → %s", date_from, date_to)
+        return pd.DataFrame(cached)
+
+    all_records: List[Dict] = []
+    cursor = dt.datetime.combine(date_from, dt.time.min)
+    end    = dt.datetime.combine(date_to, dt.time.max)
+    chunk_days = 7
+
+    while cursor < end:
+        chunk_end = min(cursor + dt.timedelta(days=chunk_days), end)
+        all_records.extend(_fetch_fuelhh_chunk(cursor, chunk_end))
+        cursor = chunk_end
+
+    logger.info("Fetched %d total FUELHH records for %s → %s", len(all_records), date_from, date_to)
+
+    if not all_records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_records)
+    keep = [c for c in ["settlementDate", "settlementPeriod", "fuelType", "generation"] if c in df.columns]
+    df = df[keep].copy()
+    df["generation"] = pd.to_numeric(df["generation"], errors="coerce").fillna(0.0)
+    if "settlementPeriod" in df.columns:
+        df["settlementPeriod"] = pd.to_numeric(df["settlementPeriod"], errors="coerce")
+    df.dropna(subset=["settlementPeriod", "fuelType"], inplace=True)
+    df.sort_values(["settlementDate", "settlementPeriod", "fuelType"], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    cache_manager.put(cache_key, df.to_dict(orient="records"))
+    return df
+
+
+def gen_cache_timestamp(date_from: dt.date, date_to: dt.date) -> Optional[float]:
+    return cache_manager.cache_timestamp(f"fuelhh_{date_from}_{date_to}")

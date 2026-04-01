@@ -157,7 +157,7 @@ def _render_backtesting_body() -> None:
     if run_backtest:
         demand_df = st.session_state.get(DEMAND_DF)
         with st.spinner("Aligning SIP, MIP and Demand series…"):
-            sip_series, mip_series, demand_series = build_aligned_series(
+            sip_series, mip_series, demand_series, _ = build_aligned_series(
                 sip_df, mip_df, demand_df=demand_df,
             )
 

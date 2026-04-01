@@ -30,6 +30,21 @@ desktop.ini
 # Streamlit
 .streamlit/secrets.toml
 
+# Secrets & credentials (catch-all for future-proofing)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Logs
+*.log
+
+# Serialised model/data files (belt-and-braces; also excluded via .cache/)
+*.joblib
+*.pkl
+*.pickle
+
 # Interview / planning docs (not part of the app)
 ohme_interview_projects.md
 project1_deep_dive.md

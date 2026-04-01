@@ -104,6 +104,10 @@ def kelly_optimal_position(
     n_runs, n_sp = delivered_mw.shape
     optimal_mw = np.zeros(n_sp)
 
+    # Allocate bankroll equally across SPs so each SP's return is sized against
+    # its share of the daily risk budget, not the full bankroll.
+    sp_bankroll = bankroll / n_sp
+
     for sp in range(n_sp):
         del_sp = delivered_mw[:, sp]
         sip_sp = sip_matrix[:, sp]
@@ -119,7 +123,7 @@ def kelly_optimal_position(
         best_commit = lo
 
         for commit in candidates:
-            g = _growth_rate_for_commit(commit, del_sp, sip_sp, da_price, bankroll)
+            g = _growth_rate_for_commit(commit, del_sp, sip_sp, da_price, sp_bankroll)
             if g > best_growth:
                 best_growth = g
                 best_commit = commit

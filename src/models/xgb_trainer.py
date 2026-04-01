@@ -167,14 +167,18 @@ def _route_series(
     sip_v: np.ndarray,
     mip_v: np.ndarray,
     demand_v: Optional[np.ndarray],
+    gen_v: Optional[np.ndarray] = None,
+    wind_v: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Returns (target_series, mip_feature, aux_feature) for _build_train_data
     and forecast_forward based on which series we are forecasting.
 
-    SIP   → target=SIP,    mip_feature=MIP,  aux=demand
-    MIP   → target=MIP,    mip_feature=None, aux=SIP
-    demand→ target=demand, mip_feature=None, aux=SIP
+    SIP              → target=SIP,    mip_feature=MIP,  aux=demand
+    MIP              → target=MIP,    mip_feature=None, aux=SIP
+    demand           → target=demand, mip_feature=None, aux=SIP
+    total_generation → target=gen,    mip_feature=None, aux=demand
+    wind             → target=wind,   mip_feature=None, aux=demand
     """
     if target == "demand":
         if demand_v is None:
@@ -182,6 +186,14 @@ def _route_series(
         return demand_v, None, sip_v
     if target == "mip":
         return mip_v, None, sip_v
+    if target == "total_generation":
+        if gen_v is None:
+            raise ValueError("gen_series required when target='total_generation'")
+        return gen_v, None, demand_v
+    if target == "wind":
+        if wind_v is None:
+            raise ValueError("wind_series required when target='wind'")
+        return wind_v, None, demand_v
     # default: sip
     return sip_v, mip_v, demand_v
 
@@ -292,6 +304,8 @@ def train_xgb_models(
     progress_callback: Optional[Callable[[float, str], None]] = None,
     param_search_mode: Literal["grid", "random"] = "grid",
     random_search_samples: int = 30,
+    gen_series: Optional[pd.Series] = None,
+    wind_series: Optional[pd.Series] = None,
 ) -> TrainedXGBModels:
     """
     Full training pipeline:
@@ -303,9 +317,11 @@ def train_xgb_models(
 
     Parameters
     ----------
-    target : "sip", "demand", or "mip" — which series to forecast.
+    target : "sip", "demand", "mip", "total_generation", or "wind".
     param_search_mode : "grid" (150 samples, in-depth) or "random" (n samples, quick).
     progress_callback : Optional (fraction, message) callback for progress bars.
+    gen_series  : Required when target="total_generation".
+    wind_series : Required when target="wind".
     """
     if not _HAS_XGB:
         raise RuntimeError("xgboost is not installed")
@@ -318,9 +334,16 @@ def train_xgb_models(
     sip_v    = sip_series.values.astype(float)
     mip_v    = mip_series.values.astype(float)
     demand_v = demand_series.values.astype(float) if demand_series is not None else None
+    gen_v    = gen_series.values.astype(float)   if gen_series   is not None else None
+    wind_v   = wind_series.values.astype(float)  if wind_series  is not None else None
 
-    train_target, train_mip, train_aux = _route_series(target, sip_v, mip_v, demand_v)
-    target_desc = {"demand": "Demand", "mip": "Wholesale (MIP)"}.get(target, "SIP")
+    train_target, train_mip, train_aux = _route_series(
+        target, sip_v, mip_v, demand_v, gen_v, wind_v
+    )
+    target_desc = {
+        "demand": "Demand", "mip": "Wholesale (MIP)",
+        "total_generation": "Total Generation", "wind": "Wind Generation",
+    }.get(target, "SIP")
 
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
 
@@ -377,6 +400,8 @@ def train_xgb_models(
         target=target,
         demand_series=demand_series,
         xgb_params=best_global,
+        gen_series=gen_series,
+        wind_series=wind_series,
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
@@ -428,6 +453,8 @@ def forecast_forward(
     mip_values: Optional[np.ndarray] = None,
     demand_values: Optional[np.ndarray] = None,
     n_days: int = 14,
+    gen_values: Optional[np.ndarray] = None,
+    wind_values: Optional[np.ndarray] = None,
 ) -> Dict[str, Dict[int, float]]:
     """
     Produce forward forecasts from the end of available data.
@@ -439,7 +466,9 @@ def forecast_forward(
 
     target = getattr(trained, "target", "sip")
     try:
-        fc_target, fc_mip, fc_aux = _route_series(target, sip_values, mip_values, demand_values)
+        fc_target, fc_mip, fc_aux = _route_series(
+            target, sip_values, mip_values, demand_values, gen_values, wind_values
+        )
     except ValueError:
         return {}
 

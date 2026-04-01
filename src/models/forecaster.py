@@ -149,16 +149,19 @@ def _extract_market_forward(
     origin_idx: int,
     horizons: List[int],
     lookback_sps: int = 336,
+    da_values: Optional[np.ndarray] = None,
 ) -> Dict[int, float]:
     """
-    Market benchmark: TOD-mean of MIP over the lookback window.
+    Market benchmark: TOD-mean of MIP over the lookback window, with an
+    upgrade for the 1-day horizon (h=48).
 
-    Rather than using the stale MIP spot-at-origin (which would
-    systematically lose to any decent forecast at longer horizons),
-    this computes the same-half-hour rolling mean of MIP — i.e. the
-    market's best unconditional view at each delivery SP.  This is
-    the fair benchmark: if our model can't beat the market's own
-    seasonal average, we have no alpha.
+    For h=48 (next-day delivery), if `da_values` (N2EX day-ahead auction
+    prices) are provided, the benchmark uses the actual DA clearing price at
+    that delivery SP rather than the MIP rolling mean.  This is a materially
+    stronger benchmark: N2EX prices are published at 13:00 D-1 and represent
+    the true market view of next-day delivery — not a rolling average.
+
+    For all other horizons, the MIP TOD-mean is used unchanged.
     """
     n = len(mip_values)
     forecasts: Dict[int, float] = {}
@@ -166,6 +169,14 @@ def _extract_market_forward(
         target_idx = origin_idx + h
         if target_idx >= n:
             continue
+
+        # 1-day horizon: use actual N2EX DA price if available
+        if h == 48 and da_values is not None and target_idx < len(da_values):
+            da_val = da_values[target_idx]
+            if np.isfinite(da_val) and da_val > 0:
+                forecasts[h] = float(da_val)
+                continue
+
         target_sp_of_day = target_idx % 48
         start = max(0, origin_idx - lookback_sps)
         window = mip_values[start:origin_idx]
@@ -191,6 +202,7 @@ def run_walk_forward_backtest(
     step: int = 1,
     ewma_alpha: float = 0.05,
     demand_series: Optional[pd.Series] = None,
+    da_series: Optional[pd.Series] = None,
 ) -> List[ForecastResult]:
     """
     Walk-forward backtest: at each origin point, produce forecasts for
@@ -207,6 +219,9 @@ def run_walk_forward_backtest(
     step : Step size between origins (1 = every SP, 48 = daily)
     ewma_alpha : EWMA smoothing parameter (higher = more weight on recent obs)
     demand_series : Optional half-hourly demand (used as feature by XGBoost)
+    da_series : Optional N2EX day-ahead prices aligned to sip_series index.
+                When provided, the h=48 market benchmark uses the actual DA
+                auction price rather than the MIP rolling mean.
     """
     if horizons is None:
         horizons = DEFAULT_HORIZONS
@@ -214,6 +229,7 @@ def run_walk_forward_backtest(
     sip_values = sip_series.values.astype(float)
     mip_values = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series is not None else None
+    da_values = da_series.values.astype(float) if da_series is not None else None
     n = len(sip_values)
 
     max_horizon = max(horizons)
@@ -247,7 +263,8 @@ def run_walk_forward_backtest(
 
         realised = _extract_realised(sip_values, idx, horizons)
         market_fwd = _extract_market_forward(mip_values, idx, horizons,
-                                             lookback_sps=lookback_sps)
+                                             lookback_sps=lookback_sps,
+                                             da_values=da_values)
 
         valid_horizons = [h for h in horizons if h in fc and h in realised and h in market_fwd]
         if not valid_horizons:
@@ -273,13 +290,14 @@ def build_aligned_series(
     sip_df: pd.DataFrame,
     mip_df: pd.DataFrame,
     demand_df: Optional[pd.DataFrame] = None,
-) -> Tuple[pd.Series, pd.Series, Optional[pd.Series]]:
+    da_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.Series, pd.Series, Optional[pd.Series], Optional[pd.Series]]:
     """
-    Align SIP, MIP (and optionally Demand) DataFrames into half-hourly
-    Series with a common datetime index.
+    Align SIP, MIP, (optionally Demand) and (optionally N2EX DA) DataFrames
+    into half-hourly Series with a common datetime index.
 
-    Returns (sip_series, mip_series, demand_series).
-    demand_series is None when demand_df is not provided or empty.
+    Returns (sip_series, mip_series, demand_series, da_series).
+    demand_series and da_series are None when not provided or empty.
     """
     sip_col = "systemBuyPrice" if "systemBuyPrice" in sip_df.columns else "systemSellPrice"
 
@@ -313,8 +331,21 @@ def build_aligned_series(
         if len(common_idx) > 0:
             demand_series = dem.loc[common_idx]
 
+    da_series: Optional[pd.Series] = None
+    if da_df is not None and not da_df.empty and "price" in da_df.columns:
+        da = da_df.copy()
+        da["datetime"] = pd.to_datetime(da["settlementDate"]) + pd.to_timedelta(
+            (da["settlementPeriod"].astype(int) - 1) * 30, unit="min"
+        )
+        da = da.set_index("datetime")["price"].sort_index()
+        da = da[~da.index.duplicated(keep="first")]
+        # DA prices don't restrict the common_idx — only fill where available
+        da_aligned = da.reindex(common_idx)
+        if da_aligned.notna().any():
+            da_series = da_aligned
+
     if len(common_idx) == 0:
         logger.warning("No overlapping timestamps between SIP, MIP and Demand")
-        return sip, mip, None
+        return sip, mip, None, None
 
-    return sip.loc[common_idx], mip.loc[common_idx], demand_series
+    return sip.loc[common_idx], mip.loc[common_idx], demand_series, da_series
