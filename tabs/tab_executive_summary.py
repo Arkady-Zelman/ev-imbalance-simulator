@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import platform
+import sys
+
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -116,3 +119,34 @@ def render(has_results: bool) -> None:
         narrative += "significant value is lost to imbalance costs — consider a more conservative position."
 
     st.markdown(narrative)
+
+    # ── Diagnostics (collapsible) ─────────────────────────────────────
+    with st.expander("Environment Diagnostics", expanded=False):
+        import importlib.metadata as _meta
+
+        _versions = {}
+        for _pkg in ("numpy", "scipy", "pandas", "plotly", "streamlit",
+                      "neuralprophet", "torch", "xgboost", "setuptools"):
+            try:
+                _versions[_pkg] = _meta.version(_pkg)
+            except _meta.PackageNotFoundError:
+                _versions[_pkg] = "NOT INSTALLED"
+
+        st.markdown(f"**Python:** `{sys.version}`  \n**OS:** `{platform.platform()}`")
+        st.markdown("**Package versions:**")
+        st.code("\n".join(f"{k:16s} {v}" for k, v in _versions.items()), language="text")
+
+        st.markdown("**Simulation intermediates:**")
+        _dmw = result.delivered_mw
+        _tmw = result.traded_mw
+        _sip = result.sip_matrix
+        diag_lines = [
+            f"delivered_mw     shape={_dmw.shape}  mean={np.mean(_dmw):.4f}  min={np.min(_dmw):.4f}  max={np.max(_dmw):.4f}",
+            f"traded_mw        shape={_tmw.shape}  sum={np.sum(_tmw):.2f}  mean={np.mean(_tmw):.4f}",
+            f"sip_matrix       shape={_sip.shape}  mean={np.mean(_sip):.2f}  min={np.min(_sip):.2f}  max={np.max(_sip):.2f}",
+            f"daily_pnl        mean={np.mean(result.daily_pnl):.2f}  std={np.std(result.daily_pnl):.2f}",
+            f"daily_revenue    mean={np.mean(result.daily_revenue):.2f}",
+            f"daily_imb_cost   mean={np.mean(result.daily_imbalance_cost):.2f}",
+            f"plugin_rates     mean={np.mean(result.plugin_rates):.6f}  min={np.min(result.plugin_rates):.6f}",
+        ]
+        st.code("\n".join(diag_lines), language="text")

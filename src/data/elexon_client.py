@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time as _time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import streamlit as st
 
 from src.config import CACHE_TTL_SECONDS, ELEXON_BASE_URL
@@ -27,7 +30,14 @@ from src.data import cache_manager
 
 logger = logging.getLogger(__name__)
 
+_retry_strategy = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
 _SESSION = requests.Session()
+_SESSION.mount("https://", HTTPAdapter(max_retries=_retry_strategy))
 _SESSION.headers.update({"Accept": "application/json"})
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -37,7 +47,7 @@ def _fetch_system_prices_for_date(date: dt.date) -> List[Dict]:
     url = f"{ELEXON_BASE_URL}/balancing/settlement/system-prices/{date.isoformat()}"
     try:
         logger.info("GET %s", url)
-        resp = _SESSION.get(url, timeout=30)
+        resp = _SESSION.get(url, timeout=45)
         resp.raise_for_status()
         payload = resp.json()
         records = payload.get("data", []) if isinstance(payload, dict) else payload
@@ -63,7 +73,7 @@ def _fetch_market_index_chunk(
     }
     try:
         logger.info("GET %s  from=%s  to=%s", url, params["from"], params["to"])
-        resp = _SESSION.get(url, params=params, timeout=30)
+        resp = _SESSION.get(url, params=params, timeout=45)
         resp.raise_for_status()
         payload = resp.json()
         records = payload.get("data", []) if isinstance(payload, dict) else payload
@@ -187,7 +197,7 @@ def _fetch_demand_outturn_chunk(
     }
     try:
         logger.info("GET %s  from=%s  to=%s", url, params["settlementDateFrom"], params["settlementDateTo"])
-        resp = _SESSION.get(url, params=params, timeout=30)
+        resp = _SESSION.get(url, params=params, timeout=45)
         resp.raise_for_status()
         payload = resp.json()
         records = payload.get("data", []) if isinstance(payload, dict) else payload
@@ -274,7 +284,7 @@ def _fetch_fuelhh_chunk(dt_from: dt.datetime, dt_to: dt.datetime) -> List[Dict]:
     }
     try:
         logger.info("GET %s  from=%s  to=%s", url, params["settlementDateFrom"], params["settlementDateTo"])
-        resp = _SESSION.get(url, params=params, timeout=30)
+        resp = _SESSION.get(url, params=params, timeout=45)
         resp.raise_for_status()
         payload = resp.json()
         records = payload.get("data", []) if isinstance(payload, dict) else payload
