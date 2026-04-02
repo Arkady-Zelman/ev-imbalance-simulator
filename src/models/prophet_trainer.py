@@ -32,7 +32,7 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -55,9 +55,10 @@ except ImportError:
     joblib = None  # type: ignore[assignment]
 
 from src.models.rolling_backtest import (
+    ROLLING_HORIZONS,
+    ROLLING_LOOKBACKS,
     CrossoverResult,
     RollingErrorRow,
-    run_rolling_backtest,
 )
 from src.models.prophet_forecaster import _neuralprophet_forecast, _values_to_df
 
@@ -95,7 +96,7 @@ NP_FIXED = {
 }
 
 # Number of combos per search mode
-_N_COMBOS = {"grid": None, "random": 6}  # None = full grid
+_N_COMBOS = {"grid": None, "random": 3}  # None = full grid
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -182,39 +183,43 @@ def _np_grid_search_single(
     end_idx: int,
     param_combos: List[dict],
     end_date=None,
-) -> Tuple[dict, float]:
+) -> Tuple[dict, float, Any]:
     """
     Time-series-safe NeuralProphet search: last 20% of the lookback window is
     held out for validation. Scores each combo by worst-window MAE of the
     multi-step forecasts against the held-out actuals.
 
-    Returns (best_params, best_score).
+    Returns (best_params, best_score, best_model).
+    best_model is the NeuralProphet object trained on the first 80% with best_params.
+    It is used by _np_holdout_backtest for out-of-sample evaluation.
     """
     start = max(0, end_idx - lookback_sps)
     window = values[start:end_idx].astype(float)
     n = len(window)
 
     if n < 96:  # need at least 2 days to split and score
-        return param_combos[0], float("inf")
+        return param_combos[0], float("inf"), None
 
     split = int(n * 0.8)
     if split < 48 or n - split < 2:
-        return param_combos[0], float("inf")
+        return param_combos[0], float("inf"), None
 
-    best_score = float("inf")
+    best_score  = float("inf")
     best_params = param_combos[0]
+    best_model  = None
 
     for params in param_combos:
         try:
-            score = _eval_np_combo(window, split, params, end_date=end_date)
+            score, model = _eval_np_combo(window, split, params, end_date=end_date)
             if score < best_score:
-                best_score = score
+                best_score  = score
                 best_params = params
+                best_model  = model
         except Exception as exc:
             logger.debug("NP combo %s failed: %s", params, exc)
             continue
 
-    return best_params, best_score
+    return best_params, best_score, best_model
 
 
 _MAX_EVAL_HORIZON = 48 * 3  # cap validation horizon at 3 days to keep grid search fast
@@ -222,10 +227,12 @@ _MAX_EVAL_HORIZON = 48 * 3  # cap validation horizon at 3 days to keep grid sear
 
 def _eval_np_combo(
     window: np.ndarray, split: int, params: dict, end_date=None,
-) -> float:
+) -> Tuple[float, Any]:
     """Fit NeuralProphet on window[:split], score on window[split:].
     Validation horizon is capped at _MAX_EVAL_HORIZON SPs to control training time.
     end_date: actual timestamp of window[-1] for correct weekday alignment.
+
+    Returns (score, fitted_model). Model is None when fitting fails or score is inf.
     """
     n_val = min(len(window) - split, _MAX_EVAL_HORIZON)
     n_lags = params.get("n_lags", 48)
@@ -266,7 +273,7 @@ def _eval_np_combo(
         key=lambda c: int(c.replace("yhat", "") or "1"),
     )
     if not yhat_cols:
-        return float("inf")
+        return float("inf"), None
 
     actuals = window[split:]
     abs_errors = []
@@ -276,9 +283,9 @@ def _eval_np_combo(
             abs_errors.append(abs(float(val.iloc[-1]) - actuals[i]))
 
     if not abs_errors:
-        return float("inf")
+        return float("inf"), None
 
-    return _worst_window_mae(np.array(abs_errors))
+    return _worst_window_mae(np.array(abs_errors)), m
 
 
 # ── Forward forecast from a fitted model ─────────────────────────────────────
@@ -409,6 +416,7 @@ def train_np_models(
     end_idx = len(target_values)
     total_steps = len(lookbacks) + 1
     step_idx = 0
+    best_models_by_lb: dict = {}  # {lb_label: (model, lb_sps)} for hold-out backtest
 
     for lb_label, lb_sps in lookbacks:
         step_idx += 1
@@ -427,11 +435,12 @@ def train_np_models(
         else:
             series_end = sip_series.index[-1] if hasattr(sip_series.index, '__len__') else None
 
-        best_p, best_score = _np_grid_search_single(
+        best_p, best_score, best_model = _np_grid_search_single(
             target_values, lb_sps, end_idx, param_combos, end_date=series_end,
         )
         result.best_params[lb_label] = best_p
         result.best_scores[lb_label] = best_score
+        best_models_by_lb[lb_label]  = (best_model, lb_sps)
 
         # Pre-compute 14-day forward forecast with best params
         fc = _np_forward_forecast(target_values, end_idx, lb_sps, best_p, n_days=14,
@@ -442,16 +451,13 @@ def train_np_models(
                     best_p.get("n_lags"), best_p.get("epochs"))
 
     if progress_callback:
-        progress_callback(step_idx / total_steps, f"Running rolling backtest ({target_desc})…")
+        progress_callback(step_idx / total_steps, f"Running hold-out backtest ({target_desc})…")
 
-    # Pick globally best params for the rolling backtest (score-weighted)
-    best_global = _pick_global_best_np(result.best_params, result.best_scores)
-    errors, crossovers = run_rolling_backtest(
-        sip_series, mip_series,
-        method="neuralprophet",
-        target=target,
-        demand_series=demand_series,
-        np_params=best_global,
+    # Fast hold-out backtest using the 80%-trained models from grid search
+    mip_v    = mip_series.values.astype(float)
+    demand_v = demand_series.values.astype(float) if demand_series is not None else None
+    errors, crossovers = _np_holdout_backtest(
+        best_models_by_lb, target_values, mip_v, demand_v, target
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
@@ -486,6 +492,152 @@ def _pick_global_best_np(
     if not serialized:
         return {**NP_FIXED, "n_lags": 96, "epochs": 15, "learning_rate": 0.1}
     return dict(Counter(serialized).most_common(1)[0][0])
+
+
+# ── Hold-out backtest using 80%-trained models ────────────────────────────────
+
+def _np_holdout_backtest(
+    best_models_by_lb: dict,
+    target_values: np.ndarray,
+    mip_values: np.ndarray,
+    demand_values: Optional[np.ndarray],
+    target: str,
+) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
+    """
+    Compute backtest metrics using the 80%-trained models saved during grid search.
+    Generates multi-step predictions on the held-out 20% for each lookback, then
+    computes MAE vs the market benchmark at each horizon.
+
+    This replaces run_rolling_backtest(method="neuralprophet") which re-trained a
+    new NeuralProphet at every daily rolling origin — impractically slow.
+    """
+    from src.models.stat_tests import diebold_mariano
+
+    benchmark_v: Optional[np.ndarray]
+    if target in ("sip", "mip"):
+        benchmark_v = mip_values
+    elif target == "demand":
+        benchmark_v = demand_values
+    else:
+        benchmark_v = None
+
+    errors: List[RollingErrorRow] = []
+
+    for lb_label, lb_sps in ROLLING_LOOKBACKS.items():
+        entry = best_models_by_lb.get(lb_label)
+        if entry is None:
+            continue
+        model, _ = entry
+        if model is None:
+            continue
+
+        n = len(target_values)
+        start = max(0, n - lb_sps)
+        window = target_values[start:n]
+        nw = len(window)
+        if nw < 96:
+            continue
+        split = int(nw * 0.8)
+        holdout_len = nw - split
+        if holdout_len < 2:
+            continue
+
+        # origin_abs: the absolute index in target_values where training ended
+        origin_abs = start + split
+
+        # Generate multi-step predictions using the stored model
+        try:
+            future = model.make_future_dataframe(
+                df=model.history, periods=holdout_len, n_historic_predictions=False,
+            )
+            forecast_df = model.predict(future)
+        except Exception as exc:
+            logger.debug("NP holdout prediction failed for %s: %s", lb_label, exc)
+            continue
+
+        yhat_cols = sorted(
+            [c for c in forecast_df.columns if c.startswith("yhat")],
+            key=lambda c: int(c.replace("yhat", "") or "1"),
+        )
+        if not yhat_cols:
+            continue
+
+        # Collect predicted values at each step in the holdout
+        pred_vals = []
+        for col in yhat_cols[:holdout_len]:
+            series = forecast_df[col].dropna()
+            if not series.empty:
+                pred_vals.append(float(series.iloc[-1]))
+            else:
+                pred_vals.append(float("nan"))
+
+        for h_sps in ROLLING_HORIZONS:
+            h_days = h_sps // 48
+            # Holdout step index (0-based within holdout)
+            step_idx_h = h_sps - 1  # h_sps steps ahead → index h_sps-1 in holdout
+            if step_idx_h >= len(pred_vals) or step_idx_h >= holdout_len:
+                continue
+            if origin_abs + h_sps >= n:
+                continue
+
+            pred = pred_vals[step_idx_h]
+            if np.isnan(pred):
+                continue
+            r = float(target_values[origin_abs + h_sps])
+            fc_err = abs(pred - r)
+
+            if benchmark_v is not None and origin_abs < len(benchmark_v):
+                mkt_err = abs(float(benchmark_v[origin_abs]) - r)
+            else:
+                mkt_err = fc_err  # no benchmark: alpha = 0
+
+            fc_arr   = np.array([fc_err],  dtype=float)
+            mkt_arr  = np.array([mkt_err], dtype=float)
+            real_arr = np.array([r],        dtype=float)
+            safe_real = np.where(np.abs(real_arr) < 1e-6, 1e-6, real_arr)
+            _, dm_p = diebold_mariano(fc_arr, mkt_arr, h=max(1, h_days), power=2)
+
+            errors.append(RollingErrorRow(
+                lookback_label=lb_label, lookback_sps=lb_sps,
+                horizon_days=h_days, horizon_sps=h_sps,
+                forecast_mae=fc_err, forecast_rmse=fc_err,
+                forecast_mape=float(np.minimum(fc_err / abs(float(safe_real[0])) * 100, 500.0)),
+                market_mae=mkt_err, market_rmse=mkt_err,
+                market_mape=float(np.minimum(mkt_err / abs(float(safe_real[0])) * 100, 500.0)),
+                alpha_mae=mkt_err - fc_err,
+                alpha_mape=0.0,
+                dm_pvalue=dm_p,
+                n_obs=1,
+            ))
+
+    # Crossover computation — same logic as run_rolling_backtest
+    crossovers: List[CrossoverResult] = []
+    for lb_label in ROLLING_LOOKBACKS:
+        lb_rows = sorted(
+            [e for e in errors if e.lookback_label == lb_label],
+            key=lambda e: e.horizon_days,
+        )
+        crossover_day, last_pos, first_neg = 15, 0.0, 0.0
+        for i, row in enumerate(lb_rows):
+            if row.alpha_mae < 0:
+                crossover_day = row.horizon_days
+                first_neg = row.alpha_mae
+                if i > 0:
+                    last_pos = lb_rows[i - 1].alpha_mae
+                break
+            last_pos = row.alpha_mae
+        if all(r.alpha_mae >= 0 for r in lb_rows) and lb_rows:
+            crossover_day = 15
+        crossovers.append(CrossoverResult(
+            lookback_label=lb_label, crossover_day=crossover_day,
+            last_positive_alpha=last_pos, first_negative_alpha=first_neg,
+        ))
+
+    logger.info(
+        "NP hold-out backtest: %d error rows, %d lookbacks",
+        len(errors), len(ROLLING_LOOKBACKS),
+    )
+    return errors, crossovers
 
 
 # ── Forward forecast (loads from stored results) ──────────────────────────────

@@ -8,10 +8,13 @@ The crossover point marks the maximum exploitable forecast horizon.
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from src.config import (
     COLOUR_DANGER,
@@ -212,15 +215,20 @@ def _render_rolling_backtest_body() -> None:
                 progress_bar.progress(min(frac, 1.0))
                 status_text.caption(msg)
 
-            trained = train_xgb_models(
-                sip_series, mip_series,
-                demand_series=demand_series,
-                target=target_key,
-                progress_callback=_progress,
-                param_search_mode=search_mode,
-                gen_series=gen_series_rb,
-                wind_series=wind_series_rb,
-            )
+            try:
+                trained = train_xgb_models(
+                    sip_series, mip_series,
+                    demand_series=demand_series,
+                    target=target_key,
+                    progress_callback=_progress,
+                    param_search_mode=search_mode,
+                    gen_series=gen_series_rb,
+                    wind_series=wind_series_rb,
+                )
+            except Exception as exc:
+                st.error(f"XGBoost training failed: {exc}")
+                logger.exception("XGBoost training error")
+                return
             progress_bar.empty()
             status_text.empty()
 
@@ -327,13 +335,18 @@ def _render_rolling_backtest_body() -> None:
                 progress_bar.progress(min(frac, 1.0))
                 status_text.caption(msg)
 
-            trained_np = train_np_models(
-                sip_series, mip_series,
-                demand_series=demand_series,
-                target=target_key,
-                progress_callback=_np_progress,
-                param_search_mode=np_search_mode,
-            )
+            try:
+                trained_np = train_np_models(
+                    sip_series, mip_series,
+                    demand_series=demand_series,
+                    target=target_key,
+                    progress_callback=_np_progress,
+                    param_search_mode=np_search_mode,
+                )
+            except Exception as exc:
+                st.error(f"NeuralProphet training failed: {exc}")
+                logger.exception("NeuralProphet training error")
+                return
             progress_bar.empty()
             status_text.empty()
 

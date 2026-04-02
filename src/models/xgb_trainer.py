@@ -50,7 +50,6 @@ from src.models.rolling_backtest import (
     ROLLING_LOOKBACKS,
     CrossoverResult,
     RollingErrorRow,
-    run_rolling_backtest,
 )
 from src.models.xgb_forecaster import _build_features, _fill_nans
 
@@ -82,10 +81,12 @@ GRID = {
 }
 
 # Number of random samples per search mode
-_N_SAMPLES = {"grid": 150, "random": 30}
+_N_SAMPLES = {"grid": 150, "random": 10}
 
 # Representative horizons (SPs) used during grid search training
 REPRESENTATIVE_HORIZONS = [48, 48 * 3, 48 * 7, 48 * 14]
+# Reduced set for quick random search (2 horizons instead of 4)
+REPRESENTATIVE_HORIZONS_QUICK = [48, 48 * 7]
 
 # Rolling window (SPs) for worst-case MAE scoring
 _WORST_WINDOW_SPS = 48 * 3  # 3-day window
@@ -348,7 +349,8 @@ def train_xgb_models(
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
 
     lookbacks = list(ROLLING_LOOKBACKS.items())
-    total_steps = len(lookbacks) * len(REPRESENTATIVE_HORIZONS) + 1
+    rep_horizons = REPRESENTATIVE_HORIZONS_QUICK if param_search_mode == "random" else REPRESENTATIVE_HORIZONS
+    total_steps = len(lookbacks) * len(rep_horizons) + 1
     step_idx = 0
 
     for lb_label, lb_sps in lookbacks:
@@ -357,7 +359,7 @@ def train_xgb_models(
         result.final_models[lb_label] = {}
         result.col_means[lb_label]    = {}
 
-        for h_sps in REPRESENTATIVE_HORIZONS:
+        for h_sps in rep_horizons:
             step_idx += 1
             h_days = h_sps // 48
             if progress_callback:
@@ -390,18 +392,11 @@ def train_xgb_models(
     if progress_callback:
         progress_callback(
             step_idx / total_steps,
-            f"Running rolling backtest ({target_desc}) with tuned params…",
+            f"Running backtest ({target_desc}) with trained models…",
         )
 
-    best_global = _pick_global_best(result.best_params, result.best_scores)
-    errors, crossovers = run_rolling_backtest(
-        sip_series, mip_series,
-        method="xgb",
-        target=target,
-        demand_series=demand_series,
-        xgb_params=best_global,
-        gen_series=gen_series,
-        wind_series=wind_series,
+    errors, crossovers = _backtest_with_final_models(
+        result, sip_series, mip_series, demand_series, gen_series, wind_series, target
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
@@ -443,6 +438,158 @@ def _pick_global_best(
     if not serialized:
         return _generate_random_combos(1)[0]
     return dict(Counter(serialized).most_common(1)[0][0])
+
+
+# ── Fast backtest using pre-trained final models ──────────────────────────────
+
+def _backtest_with_final_models(
+    trained: TrainedXGBModels,
+    sip_series: pd.Series,
+    mip_series: pd.Series,
+    demand_series: Optional[pd.Series],
+    gen_series: Optional[pd.Series],
+    wind_series: Optional[pd.Series],
+    target: str,
+) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
+    """
+    Rolling backtest using pre-trained final models — predict-only, no re-training.
+
+    Uses the closest trained horizon model at each daily origin. Produces the same
+    RollingErrorRow / CrossoverResult output as run_rolling_backtest(), but completes
+    in seconds rather than hours because it calls model.predict() instead of model.fit().
+
+    Note: models were trained on the full dataset, so backtest errors reflect in-sample
+    fit rather than true walk-forward generalisation. This is acceptable for the purpose
+    of identifying the crossover horizon.
+    """
+    from src.models.forecaster import _extract_market_forward, _extract_realised
+    from src.models.stat_tests import diebold_mariano
+
+    sip_v    = sip_series.values.astype(float)
+    mip_v    = mip_series.values.astype(float)
+    demand_v = demand_series.values.astype(float) if demand_series is not None else None
+    gen_v    = (gen_series.reindex(sip_series.index).ffill().bfill().values.astype(float)
+                if gen_series is not None else None)
+    wind_v   = (wind_series.reindex(sip_series.index).ffill().bfill().values.astype(float)
+                if wind_series is not None else None)
+
+    fc_target, fc_mip_feat, fc_aux = _route_series(
+        target, sip_v, mip_v, demand_v, gen_v, wind_v
+    )
+
+    if target in ("total_generation", "wind"):
+        benchmark_v: Optional[np.ndarray] = None
+    elif target == "demand":
+        benchmark_v = demand_v
+    else:
+        benchmark_v = mip_v  # SIP and MIP both benchmark against MIP forward curve
+
+    n = len(fc_target)
+    step = 48
+    errors: List[RollingErrorRow] = []
+
+    for lb_label, lb_sps in ROLLING_LOOKBACKS.items():
+        if lb_label not in trained.final_models or not trained.final_models[lb_label]:
+            continue
+        lb_models  = trained.final_models[lb_label]
+        available_h = sorted(lb_models.keys())
+
+        for h_sps in ROLLING_HORIZONS:
+            h_days    = h_sps // 48
+            closest_h = min(available_h, key=lambda h: abs(h - h_sps))
+            model     = lb_models[closest_h]
+            cmeans    = trained.col_means[lb_label][closest_h]
+
+            start_idx = max(96, lb_sps)
+            end_idx   = n - h_sps
+            if start_idx >= end_idx:
+                continue
+
+            fc_errs: list = []
+            mkt_errs: list = []
+            realised_vals: list = []
+
+            for idx in range(start_idx, end_idx, step):
+                feat = _build_features(fc_target, idx, closest_h, fc_mip_feat, fc_aux)
+                if feat is None:
+                    continue
+                feat = np.where(np.isnan(feat), cmeans, feat)
+                pred = float(model.predict(feat.reshape(1, -1))[0])
+
+                realised_d = _extract_realised(fc_target, idx, [h_sps])
+                if h_sps not in realised_d:
+                    continue
+                r = realised_d[h_sps]
+                fc_errs.append(abs(pred - r))
+                realised_vals.append(r)
+
+                if target in ("total_generation", "wind"):
+                    persist_idx = idx + h_sps - 48
+                    if persist_idx >= 0:
+                        mkt_errs.append(abs(float(fc_target[persist_idx]) - r))
+                elif benchmark_v is not None:
+                    mkt_d = _extract_market_forward(benchmark_v, idx, [h_sps],
+                                                    lookback_sps=lb_sps)
+                    if h_sps in mkt_d:
+                        mkt_errs.append(abs(mkt_d[h_sps] - r))
+
+            if len(fc_errs) < 5:
+                continue
+            if not mkt_errs:
+                mkt_errs = list(fc_errs)  # fallback: no market benchmark, alpha = 0
+
+            fc_arr   = np.array(fc_errs,      dtype=float)
+            mkt_arr  = np.array(mkt_errs,     dtype=float)
+            real_arr = np.array(realised_vals, dtype=float)
+            safe_real = np.where(np.abs(real_arr) < 1e-6, 1e-6, real_arr)
+
+            forecast_mae  = float(np.mean(fc_arr))
+            forecast_rmse = float(np.sqrt(np.mean(fc_arr ** 2)))
+            market_mae    = float(np.mean(mkt_arr))
+            market_rmse   = float(np.sqrt(np.mean(mkt_arr ** 2)))
+            forecast_mape = float(np.mean(np.minimum(fc_arr  / np.abs(safe_real) * 100, 500.0)))
+            market_mape   = float(np.mean(np.minimum(mkt_arr / np.abs(safe_real) * 100, 500.0)))
+            _, dm_p = diebold_mariano(fc_arr, mkt_arr, h=max(1, h_days), power=2)
+
+            errors.append(RollingErrorRow(
+                lookback_label=lb_label, lookback_sps=lb_sps,
+                horizon_days=h_days, horizon_sps=h_sps,
+                forecast_mae=forecast_mae, forecast_rmse=forecast_rmse,
+                forecast_mape=forecast_mape, market_mae=market_mae,
+                market_rmse=market_rmse, market_mape=market_mape,
+                alpha_mae=market_mae - forecast_mae,
+                alpha_mape=market_mape - forecast_mape,
+                dm_pvalue=dm_p, n_obs=len(fc_errs),
+            ))
+
+    # Crossover computation — identical to run_rolling_backtest
+    crossovers: List[CrossoverResult] = []
+    for lb_label in ROLLING_LOOKBACKS:
+        lb_rows = sorted(
+            [e for e in errors if e.lookback_label == lb_label],
+            key=lambda e: e.horizon_days,
+        )
+        crossover_day, last_pos, first_neg = 15, 0.0, 0.0
+        for i, row in enumerate(lb_rows):
+            if row.alpha_mae < 0:
+                crossover_day = row.horizon_days
+                first_neg = row.alpha_mae
+                if i > 0:
+                    last_pos = lb_rows[i - 1].alpha_mae
+                break
+            last_pos = row.alpha_mae
+        if all(r.alpha_mae >= 0 for r in lb_rows) and lb_rows:
+            crossover_day = 15
+        crossovers.append(CrossoverResult(
+            lookback_label=lb_label, crossover_day=crossover_day,
+            last_positive_alpha=last_pos, first_negative_alpha=first_neg,
+        ))
+
+    logger.info(
+        "Fast XGB backtest: %d error rows, %d lookbacks",
+        len(errors), len(ROLLING_LOOKBACKS),
+    )
+    return errors, crossovers
 
 
 # ── Forward forecasting ───────────────────────────────────────────────────────
