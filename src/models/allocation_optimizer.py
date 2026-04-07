@@ -10,10 +10,12 @@ to produce risk-adjusted per-SP allocation recommendations.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 
 from src.config import NUM_SETTLEMENT_PERIODS
 
@@ -56,6 +58,35 @@ class AllocationResult:
     pure_wholesale_strategy: StrategyResult
     pure_balancing_strategy: StrategyResult
     risk_tolerance: float
+
+
+@dataclass(frozen=True)
+class RiskProfile:
+    """Defines a position-sizing + market-split configuration."""
+    name: str
+    percentile: int        # MC availability percentile for position anchor
+    risk_tolerance: float  # 0.0 = max E[revenue]; 1.0 = max tail protection
+    description: str
+
+
+RISK_PROFILES: Dict[str, RiskProfile] = {
+    "Conservative": RiskProfile("Conservative", 50, 0.8,
+                                "P50 positions · strongly tail-risk averse"),
+    "Moderate":     RiskProfile("Moderate",     70, 0.5,
+                                "P70 positions · balanced risk/return"),
+    "Aggressive":   RiskProfile("Aggressive",   80, 0.25,
+                                "P80 positions · return-seeking"),
+    "Full Risk":    RiskProfile("Full Risk",    95, 0.0,
+                                "P95 positions · maximise expected revenue"),
+}
+
+
+@dataclass
+class MultiProfileResult:
+    """Allocation results across all risk profiles."""
+    profile_results:   Dict[str, AllocationResult]  # profile name -> result
+    profile_positions: Dict[str, np.ndarray]          # profile name -> (48,) MW
+    comparison_df:     Any                            # pd.DataFrame summary
 
 
 def _compute_strategy_result(
@@ -125,6 +156,7 @@ def optimize_allocation(
     delivered_mw: np.ndarray,
     risk_tolerance: float = 0.5,
     grid_steps: int = 21,
+    base_percentile: int = 50,
 ) -> AllocationResult:
     """
     Find the optimal wholesale vs. balancing split per settlement period.
@@ -152,7 +184,7 @@ def optimize_allocation(
         sip_fc = float(sip_forecasts[sp])
         mip_fc = float(mip_forecasts[sp])
 
-        p50 = float(np.median(delivered_sp))
+        p50 = float(np.percentile(delivered_sp, base_percentile))
         p99 = float(np.percentile(delivered_sp, 99))
 
         if p50 < 1e-6:
@@ -231,4 +263,75 @@ def optimize_allocation(
         pure_wholesale_strategy=wholesale_strat,
         pure_balancing_strategy=balancing_strat,
         risk_tolerance=risk_tolerance,
+    )
+
+
+def _portfolio_ob_ratio(alloc: AllocationResult) -> float:
+    total_c = sum(a.total_committed    for a in alloc.sp_allocations)
+    total_e = sum(a.expected_delivered for a in alloc.sp_allocations)
+    return total_c / total_e if total_e > 1e-9 else 1.0
+
+
+def optimize_all_risk_profiles(
+    sip_forecasts: np.ndarray,
+    mip_forecasts: np.ndarray,
+    delivered_mw: np.ndarray,
+    profiles: Optional[Dict[str, RiskProfile]] = None,
+    grid_steps: int = 21,
+) -> MultiProfileResult:
+    """
+    Run optimize_allocation() for each risk profile in parallel.
+
+    Each profile specifies its own base_percentile (position-size anchor from
+    the MC availability distribution) and risk_tolerance (wholesale vs balancing
+    split aggressiveness). Results are returned together with a comparison DataFrame.
+    """
+    if profiles is None:
+        profiles = RISK_PROFILES
+
+    profile_results:   Dict[str, AllocationResult] = {}
+    profile_positions: Dict[str, np.ndarray]        = {}
+
+    def _run(name: str, p: RiskProfile):
+        alloc = optimize_allocation(
+            sip_forecasts=sip_forecasts,
+            mip_forecasts=mip_forecasts,
+            delivered_mw=delivered_mw,
+            risk_tolerance=p.risk_tolerance,
+            grid_steps=grid_steps,
+            base_percentile=p.percentile,
+        )
+        position_mw = np.percentile(delivered_mw, p.percentile, axis=0)
+        return name, alloc, position_mw
+
+    with _TPE(max_workers=len(profiles)) as ex:
+        futures = {ex.submit(_run, n, p): n for n, p in profiles.items()}
+        for fut in _ac(futures):
+            name, alloc, pos = fut.result()
+            profile_results[name]   = alloc
+            profile_positions[name] = pos
+
+    rows = []
+    for name, p in profiles.items():
+        opt = profile_results[name].optimal_strategy
+        pos = profile_positions[name]
+        rows.append({
+            "Profile":          name,
+            "Percentile":       f"P{p.percentile}",
+            "Risk Tolerance":   p.risk_tolerance,
+            "Mean Position MW": round(float(np.mean(pos)), 2),
+            "Peak Position MW": round(float(np.max(pos)), 2),
+            "E[Daily P&L] £":   round(opt.mean_pnl, 0),
+            "Median P&L £":     round(opt.median_pnl, 0),
+            "ES 5% £":          round(opt.es_5, 0),
+            "Std P&L £":        round(opt.std_pnl, 0),
+            "Max Loss £":       round(opt.max_loss, 0),
+            "Reward/Risk":      round(opt.reward_to_risk, 3),
+            "OB Ratio":         round(_portfolio_ob_ratio(profile_results[name]), 3),
+        })
+
+    return MultiProfileResult(
+        profile_results=profile_results,
+        profile_positions=profile_positions,
+        comparison_df=pd.DataFrame(rows),
     )

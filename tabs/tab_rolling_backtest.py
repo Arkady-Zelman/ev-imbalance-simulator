@@ -9,6 +9,7 @@ The crossover point marks the maximum exploitable forecast horizon.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -43,10 +44,11 @@ from src.models.xgb_trainer import (
     has_trained_models,
     load_trained_models,
     save_trained_models,
+    train_all_xgb_parallel,
     train_xgb_models,
 )
 from src.models.dispatch_engine import process_generation_outturn
-from src.session_keys import DEMAND_DF, GEN_DF, MIP_DF, SIP_DF
+from src.session_keys import DEMAND_DF, GEN_DF, MIP_DF, SELECTED_LOOKBACK, SIP_DF
 
 
 def render(has_results: bool) -> None:
@@ -87,7 +89,7 @@ def _render_rolling_backtest_body() -> None:
 
     # ── Configuration ─────────────────────────────────────────────────
     st.subheader("Configuration")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         target_options = ["Price (SIP)", "Wholesale (MIP)"]
         if has_demand:
@@ -127,6 +129,20 @@ def _render_rolling_backtest_body() -> None:
             key="rb_ewma_alpha",
             help="Only used when EWMA is selected.",
         )
+    with col4:
+        lb_options = ["All (1d · 5d · 15d · 30d)"] + list(ROLLING_LOOKBACKS.keys())
+        lb_sel = st.selectbox(
+            "Lookback Window",
+            lb_options,
+            index=0,
+            key="rb_lookback_select",
+            help=(
+                "Pick a single lookback to train faster and focus model accuracy. "
+                "'All' trains every window (original behaviour)."
+            ),
+        )
+        selected_lookback: Optional[str] = None if lb_sel.startswith("All") else lb_sel
+        st.session_state[SELECTED_LOOKBACK] = selected_lookback
 
     if target_key == "demand" and not has_demand:
         st.warning("No demand data available. Run a simulation with demand data first.")
@@ -224,6 +240,7 @@ def _render_rolling_backtest_body() -> None:
                     param_search_mode=search_mode,
                     gen_series=gen_series_rb,
                     wind_series=wind_series_rb,
+                    selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
                 )
             except Exception as exc:
                 st.error(f"XGBoost training failed: {exc}")
@@ -270,6 +287,86 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
             st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
+
+        # ── Train All 4 Models Simultaneously ─────────────────────────────
+        st.markdown("---")
+        st.subheader("Train All 4 Models Simultaneously")
+        st.caption(
+            "Trains SIP · MIP · Demand · Generation in parallel. "
+            "Select a single **Lookback Window** above to keep runtime manageable."
+        )
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            para_deep = st.button(
+                "🏋️ All 4 — In-Depth",
+                use_container_width=True, type="primary", key="rb_para_deep",
+                help="150-sample grid search per model. Best accuracy; takes several minutes.",
+            )
+        with col_p2:
+            para_quick = st.button(
+                "⚡ All 4 — Quick",
+                use_container_width=True, key="rb_para_quick",
+                help="30-sample random search per model. Fast point-in-time tuning.",
+            )
+
+        para_mode: Optional[str] = "grid" if para_deep else ("random" if para_quick else None)
+
+        if para_mode is not None:
+            with st.spinner("Aligning series for parallel training…"):
+                sip_series_p, mip_series_p, demand_series_p, _ = build_aligned_series(
+                    sip_df, mip_df, demand_df=demand_df,
+                )
+            n_days_p = len(sip_series_p) // 48
+            if n_days_p < 45:
+                st.error(
+                    f"Need at least 45 days of aligned data. "
+                    f"Currently have {n_days_p} days. Increase the date range."
+                )
+            else:
+                para_targets = ["sip", "mip"]
+                if has_demand:
+                    para_targets.append("demand")
+                if has_gen:
+                    para_targets.append("total_generation")
+
+                _target_labels = {
+                    "sip": "Price (SIP)", "mip": "Wholesale (MIP)",
+                    "demand": "Demand", "total_generation": "Generation",
+                }
+
+                para_bars = {t: st.progress(0.0, text=_target_labels.get(t, t))
+                             for t in para_targets}
+
+                def _make_para_cb(tgt: str):
+                    def _cb(frac: float, msg: str) -> None:
+                        para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                    return _cb
+
+                para_cbs = {t: _make_para_cb(t) for t in para_targets}
+
+                with st.spinner(f"Training {len(para_targets)} models in parallel…"):
+                    para_result = train_all_xgb_parallel(
+                        sip_series=sip_series_p,
+                        mip_series=mip_series_p,
+                        demand_series=demand_series_p if has_demand else None,
+                        gen_series=gen_series_rb,
+                        targets=para_targets,
+                        param_search_mode=para_mode,
+                        selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
+                        progress_callbacks=para_cbs,
+                    )
+
+                for t, trained_p in para_result.models.items():
+                    st.session_state[f"_xgb_trained_models_{t}"] = trained_p
+                for t, err in para_result.errors.items():
+                    st.error(f"{_target_labels.get(t, t)} training failed: {err}")
+
+                ok_targets = list(para_result.models.keys())
+                if ok_targets:
+                    st.success(
+                        f"Parallel training complete in {para_result.elapsed_seconds:.0f}s — "
+                        f"trained: {', '.join(_target_labels.get(t, t) for t in ok_targets)}"
+                    )
 
     elif method_key == "neuralprophet":
         # ── NeuralProphet: full training workflow (mirrors XGBoost) ──────────

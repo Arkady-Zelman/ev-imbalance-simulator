@@ -307,6 +307,7 @@ def train_xgb_models(
     random_search_samples: int = 30,
     gen_series: Optional[pd.Series] = None,
     wind_series: Optional[pd.Series] = None,
+    selected_lookback: Optional[str] = None,
 ) -> TrainedXGBModels:
     """
     Full training pipeline:
@@ -348,7 +349,10 @@ def train_xgb_models(
 
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
 
-    lookbacks = list(ROLLING_LOOKBACKS.items())
+    if selected_lookback and selected_lookback in ROLLING_LOOKBACKS:
+        lookbacks = [(selected_lookback, ROLLING_LOOKBACKS[selected_lookback])]
+    else:
+        lookbacks = list(ROLLING_LOOKBACKS.items())
     rep_horizons = REPRESENTATIVE_HORIZONS_QUICK if param_search_mode == "random" else REPRESENTATIVE_HORIZONS
     total_steps = len(lookbacks) * len(rep_horizons) + 1
     step_idx = 0
@@ -562,9 +566,10 @@ def _backtest_with_final_models(
                 dm_pvalue=dm_p, n_obs=len(fc_errs),
             ))
 
-    # Crossover computation — identical to run_rolling_backtest
+    # Crossover computation — only over lookbacks that were actually trained
     crossovers: List[CrossoverResult] = []
-    for lb_label in ROLLING_LOOKBACKS:
+    present_lookbacks = {e.lookback_label for e in errors}
+    for lb_label in present_lookbacks:
         lb_rows = sorted(
             [e for e in errors if e.lookback_label == lb_label],
             key=lambda e: e.horizon_days,
@@ -645,6 +650,86 @@ def forecast_forward(
         result[lb_label] = lb_forecasts
 
     return result
+
+
+# ── Parallel multi-target training ───────────────────────────────────────────
+
+from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _as_completed
+
+
+@dataclass
+class ParallelTrainingResult:
+    """Results from simultaneously training multiple XGB targets."""
+    models: Dict[str, "TrainedXGBModels"]   # target -> trained model
+    errors: Dict[str, str]                   # target -> error message if failed
+    elapsed_seconds: float
+
+
+def train_all_xgb_parallel(
+    sip_series: pd.Series,
+    mip_series: pd.Series,
+    demand_series: Optional[pd.Series] = None,
+    gen_series: Optional[pd.Series] = None,
+    wind_series: Optional[pd.Series] = None,
+    targets: Optional[List[str]] = None,
+    param_search_mode: Literal["grid", "random"] = "grid",
+    selected_lookback: Optional[str] = None,
+    progress_callbacks: Optional[Dict[str, Callable[[float, str], None]]] = None,
+) -> ParallelTrainingResult:
+    """
+    Train up to 4 XGB models simultaneously using a ThreadPoolExecutor.
+
+    XGBoost's C extension releases the GIL during fit/predict, so threads
+    achieve near-true parallelism on multi-core hardware even in CPython.
+
+    Parameters
+    ----------
+    targets : Targets to train. Defaults to available targets given the data.
+    selected_lookback : If set, each model trains only this lookback window.
+    progress_callbacks : Dict mapping target name to a (fraction, msg) callback.
+    """
+    if targets is None:
+        targets = ["sip", "mip"]
+        if demand_series is not None:
+            targets.append("demand")
+        if gen_series is not None:
+            targets.append("total_generation")
+
+    cbs: Dict[str, Callable] = progress_callbacks or {}
+    t0 = time.time()
+    results: Dict[str, TrainedXGBModels] = {}
+    errs: Dict[str, str] = {}
+
+    def _train_one(tgt: str) -> TrainedXGBModels:
+        return train_xgb_models(
+            sip_series=sip_series,
+            mip_series=mip_series,
+            demand_series=demand_series,
+            gen_series=gen_series,
+            wind_series=wind_series,
+            target=tgt,
+            progress_callback=cbs.get(tgt),
+            param_search_mode=param_search_mode,
+            selected_lookback=selected_lookback,
+        )
+
+    with _TPE(max_workers=len(targets)) as ex:
+        futures = {ex.submit(_train_one, t): t for t in targets}
+        for fut in _as_completed(futures):
+            tgt = futures[fut]
+            try:
+                trained = fut.result()
+                save_trained_models(trained, target=tgt)
+                results[tgt] = trained
+            except Exception as exc:
+                errs[tgt] = str(exc)
+                logger.error("Parallel XGB training failed for %s: %s", tgt, exc)
+
+    return ParallelTrainingResult(
+        models=results,
+        errors=errs,
+        elapsed_seconds=time.time() - t0,
+    )
 
 
 # ── Disk persistence ──────────────────────────────────────────────────────────

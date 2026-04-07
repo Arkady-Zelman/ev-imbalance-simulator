@@ -24,14 +24,20 @@ from src.config import (
     PLOTLY_TEMPLATE,
     SP_LABELS,
 )
-from src.models.allocation_optimizer import AllocationResult, optimize_allocation
+from src.models.allocation_optimizer import (
+    AllocationResult,
+    MultiProfileResult,
+    RISK_PROFILES,
+    optimize_allocation,
+    optimize_all_risk_profiles,
+)
 from src.models.forecaster import build_aligned_series
 from src.models.xgb_trainer import (
     forecast_forward,
     has_trained_models,
     load_trained_models,
 )
-from src.session_keys import DEMAND_DF, MIP_DF, RESULT, SIP_DF
+from src.session_keys import DEMAND_DF, MIP_DF, MULTI_PROFILE_RESULTS, RESULT, SIP_DF
 
 
 def render(has_results: bool) -> None:
@@ -93,6 +99,10 @@ def _render_allocation_body(result) -> None:
 
     sip_fc_48 = _build_48sp_forecast(trained_sip, sip_values, mip_values, demand_values, "SIP")
     mip_fc_48 = _build_48sp_forecast(trained_mip, sip_values, mip_values, demand_values, "MIP")
+
+    # Cache so the multi-profile section can access them without re-computing
+    st.session_state["_alloc_sip_fc_48"] = sip_fc_48
+    st.session_state["_alloc_mip_fc_48"] = mip_fc_48
 
     if sip_fc_48 is None and mip_fc_48 is None:
         st.error("Could not generate any forward forecasts. Train models first.")
@@ -380,6 +390,109 @@ def _render_allocation_body(result) -> None:
         fig_sens.update_yaxes(title_text="Overbook Ratio", secondary_y=False)
         fig_sens.update_yaxes(title_text="Revenue (£)", secondary_y=True)
         st.plotly_chart(fig_sens, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Section: Multi-Profile Risk Comparison
+    # ══════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.subheader("Multi-Profile Risk Comparison")
+    st.caption(
+        "Runs Conservative · Moderate · Aggressive · Full Risk profiles in parallel. "
+        "Each profile combines a different MC availability percentile (position size) "
+        "with a different risk tolerance (wholesale vs balancing split)."
+    )
+
+    _PROFILE_COLOURS = {
+        "Conservative": COLOUR_SUCCESS,
+        "Moderate":     COLOUR_PRIMARY,
+        "Aggressive":   COLOUR_WARNING,
+        "Full Risk":    COLOUR_DANGER,
+    }
+
+    cols_prof = st.columns(4)
+    for i, (pname, p) in enumerate(RISK_PROFILES.items()):
+        with cols_prof[i]:
+            st.markdown(f"**{pname}**")
+            st.caption(f"P{p.percentile} · RT={p.risk_tolerance:.2f}")
+            st.caption(p.description)
+
+    mp_btn = st.button(
+        "⚡ Compute All Risk Profiles",
+        use_container_width=True, type="primary", key="alloc_multi_run",
+        help="Optimises allocation for all 4 risk profiles simultaneously.",
+    )
+
+    if mp_btn:
+        _sip_fc = st.session_state.get("_alloc_sip_fc_48")
+        _mip_fc = st.session_state.get("_alloc_mip_fc_48")
+        if _sip_fc is None or _mip_fc is None:
+            st.error(
+                "Forecasts not yet available. "
+                "Scroll up and run **Optimise Allocation** once to generate them."
+            )
+        else:
+            with st.spinner("Optimising 4 risk profiles in parallel…"):
+                mp = optimize_all_risk_profiles(
+                    sip_forecasts=_sip_fc,
+                    mip_forecasts=_mip_fc,
+                    delivered_mw=delivered_mw,
+                )
+            st.session_state[MULTI_PROFILE_RESULTS] = mp
+            st.success("Multi-profile optimisation complete.")
+
+    mp: MultiProfileResult | None = st.session_state.get(MULTI_PROFILE_RESULTS)
+    if mp is not None:
+        st.dataframe(mp.comparison_df, use_container_width=True)
+
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            fig_pnl = go.Figure()
+            for pname, palloc in mp.profile_results.items():
+                fig_pnl.add_trace(go.Histogram(
+                    x=palloc.optimal_strategy.daily_pnl,
+                    name=pname,
+                    marker_color=_PROFILE_COLOURS.get(pname, COLOUR_MUTED),
+                    opacity=0.55, nbinsx=50,
+                ))
+            fig_pnl.update_layout(
+                template=PLOTLY_TEMPLATE, barmode="overlay",
+                title="P&L Distribution by Risk Profile",
+                xaxis_title="Daily P&L (£)", yaxis_title="Count", height=400,
+            )
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
+        with col_right:
+            fig_rr = go.Figure()
+            for pname, palloc in mp.profile_results.items():
+                opt = palloc.optimal_strategy
+                fig_rr.add_trace(go.Scatter(
+                    x=[opt.es_5], y=[opt.mean_pnl],
+                    mode="markers+text", name=pname,
+                    text=[pname], textposition="top center",
+                    marker=dict(size=14,
+                                color=_PROFILE_COLOURS.get(pname, COLOUR_MUTED)),
+                ))
+            fig_rr.update_layout(
+                template=PLOTLY_TEMPLATE,
+                title="Risk-Return Frontier",
+                xaxis_title="ES 5% (£)", yaxis_title="E[Daily P&L] (£)", height=400,
+            )
+            st.plotly_chart(fig_rr, use_container_width=True)
+
+        fig_pos = go.Figure()
+        for pname, pos_mw in mp.profile_positions.items():
+            fig_pos.add_trace(go.Scatter(
+                x=SP_LABELS[:NUM_SETTLEMENT_PERIODS], y=pos_mw,
+                mode="lines", name=pname,
+                line=dict(color=_PROFILE_COLOURS.get(pname, COLOUR_MUTED), width=2),
+            ))
+        fig_pos.update_layout(
+            template=PLOTLY_TEMPLATE,
+            title="Traded Position by Risk Profile (MW per Settlement Period)",
+            xaxis_title="Settlement Period", yaxis_title="MW", height=380,
+        )
+        st.plotly_chart(fig_pos, use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════
     # Methodology
