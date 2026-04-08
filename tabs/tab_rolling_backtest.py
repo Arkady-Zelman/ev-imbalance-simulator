@@ -615,6 +615,142 @@ def _render_rolling_backtest_body() -> None:
                     f"trained: {', '.join(_target_labels_all.get(t, t) for t in ok_np)}"
                 )
 
+    # ── Model Diagnostics (XGBoost only) ─────────────────────────────
+    if method_key == "xgb":
+        _trained_diag = st.session_state.get(f"_xgb_trained_models_{target_key}")
+        if _trained_diag is not None and getattr(_trained_diag, "grid_search_history", None):
+            st.markdown("---")
+            st.subheader("🔍 Model Diagnostics")
+            st.caption(
+                "Diagnostics are generated from the last training run. "
+                "Re-train to refresh after changing data or parameters."
+            )
+
+            diag_tab1, diag_tab2, diag_tab3 = st.tabs([
+                "Overfitting Gauge", "Parameter Sensitivity", "Residual Diagnostics"
+            ])
+
+            with diag_tab1:
+                st.caption(
+                    "Train MAE (in-sample) vs Validation MAE (held-out 20%) for each "
+                    "lookback × horizon cell. A large gap indicates overfitting."
+                )
+                ov_rows = []
+                for lb, h_dict in _trained_diag.best_scores.items():
+                    for h_sps, val_mae in h_dict.items():
+                        train_mae = (_trained_diag.train_scores or {}).get(lb, {}).get(h_sps, float("nan"))
+                        ratio = val_mae / train_mae if (train_mae and train_mae > 0) else float("nan")
+                        ov_rows.append({
+                            "Lookback": lb, "Horizon (d)": h_sps // 48,
+                            "Label": f"{lb} / {h_sps // 48}d",
+                            "Train MAE": train_mae, "Val MAE": val_mae,
+                            "Overfit ratio": ratio,
+                        })
+                if ov_rows:
+                    df_ov = pd.DataFrame(ov_rows).dropna(subset=["Train MAE", "Val MAE"])
+                    labels = df_ov["Label"].tolist()
+                    fig_ov = go.Figure()
+                    fig_ov.add_bar(name="Train MAE", x=labels, y=df_ov["Train MAE"].tolist(),
+                                   marker_color=COLOUR_PRIMARY)
+                    fig_ov.add_bar(name="Val MAE", x=labels, y=df_ov["Val MAE"].tolist(),
+                                   marker_color=COLOUR_WARNING)
+                    fig_ov.update_layout(
+                        template=PLOTLY_TEMPLATE, barmode="group",
+                        title="Train vs Validation MAE per (Lookback, Horizon)",
+                        xaxis_title="Lookback / Horizon", yaxis_title="MAE (£/MWh or MW)",
+                        height=400,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    st.plotly_chart(fig_ov, use_container_width=True)
+                    worst_ratio = df_ov["Overfit ratio"].max()
+                    if worst_ratio > 2.0:
+                        st.error(f"Overfit ratio up to **{worst_ratio:.1f}×** — model is heavily overfitting. Try higher regularisation (reg_alpha, reg_lambda, max_depth) or a shorter lookback.")
+                    elif worst_ratio > 1.3:
+                        st.warning(f"Overfit ratio up to **{worst_ratio:.1f}×** — mild overfitting. Consider regularisation tuning.")
+                    else:
+                        st.success(f"Overfit ratio ≤ **{worst_ratio:.2f}×** — train/val gap looks healthy.")
+
+            with diag_tab2:
+                st.caption(
+                    "Each point is one hyperparameter combo tried during grid search. "
+                    "Lower validation score = better. Select a parameter to inspect its effect."
+                )
+                hist_rows = []
+                for lb, h_dict in _trained_diag.grid_search_history.items():
+                    for h_sps, combos in h_dict.items():
+                        for (params, val_score) in combos:
+                            if val_score < 1e9:
+                                hist_rows.append({
+                                    **params,
+                                    "val_score": val_score,
+                                    "Lookback": lb,
+                                    "Horizon (d)": h_sps // 48,
+                                })
+                if hist_rows:
+                    df_hist = pd.DataFrame(hist_rows)
+                    param_cols = [c for c in df_hist.columns
+                                  if c not in ("val_score", "Lookback", "Horizon (d)")]
+                    chosen_param = st.selectbox(
+                        "Hyperparameter to inspect", param_cols,
+                        key="rb_diag_param_select",
+                    )
+                    if chosen_param:
+                        fig_ps = go.Figure()
+                        for lb_val in df_hist["Lookback"].unique():
+                            sub = df_hist[df_hist["Lookback"] == lb_val]
+                            fig_ps.add_trace(go.Scatter(
+                                x=sub[chosen_param], y=sub["val_score"],
+                                mode="markers", name=lb_val, opacity=0.7,
+                                marker=dict(size=6),
+                            ))
+                        fig_ps.update_layout(
+                            template=PLOTLY_TEMPLATE,
+                            title=f"Validation Score vs {chosen_param}",
+                            xaxis_title=chosen_param,
+                            yaxis_title="Validation MAE (worst-window)",
+                            height=420,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        )
+                        st.plotly_chart(fig_ps, use_container_width=True)
+                        st.caption(f"Total combos shown: {len(hist_rows)}")
+
+            with diag_tab3:
+                st.caption(
+                    "Computed from backtest errors. "
+                    "**Bias** = systematic over/under-prediction. "
+                    "**Lag-1 ACF** = residual autocorrelation (high → model missed trends)."
+                )
+                _diag_errors = getattr(_trained_diag, "backtest_errors", [])
+                if _diag_errors:
+                    from collections import defaultdict as _dd
+                    lb_errs: dict = _dd(list)
+                    for row in _diag_errors:
+                        lb_errs[row.lookback_label].append(row.forecast_mae - row.market_mae)
+                    res_rows = []
+                    for lb_l, diffs in lb_errs.items():
+                        arr = np.array(diffs, dtype=float)
+                        bias = float(np.mean(arr))
+                        acf1 = (float(np.corrcoef(arr[:-1], arr[1:])[0, 1])
+                                if len(arr) > 2 else float("nan"))
+                        mean_mae = float(np.mean([r.forecast_mae for r in _diag_errors
+                                                   if r.lookback_label == lb_l]))
+                        res_rows.append({
+                            "Lookback": lb_l, "Bias (fc−mkt)": round(bias, 3),
+                            "Lag-1 ACF": round(acf1, 3), "Mean Forecast MAE": round(mean_mae, 3),
+                        })
+                    if res_rows:
+                        st.dataframe(pd.DataFrame(res_rows), use_container_width=True, hide_index=True)
+                        for r in res_rows:
+                            lb_l = r["Lookback"]
+                            acf = r["Lag-1 ACF"]
+                            bias = r["Bias (fc−mkt)"]
+                            if abs(acf) > 0.3:
+                                st.warning(f"**{lb_l}**: Lag-1 ACF = {acf:.2f} — errors are serially correlated. Model may be missing a trend or seasonal pattern.")
+                            if abs(bias) > 1.0:
+                                st.info(f"**{lb_l}**: Bias = {bias:.2f} — forecast is systematically {'above' if bias > 0 else 'below'} market benchmark.")
+                else:
+                    st.info("No backtest errors available. Show Results first.")
+
     # ── Results ───────────────────────────────────────────────────────
     rb_key_prefix = st.session_state.get("_rb_last_key")
     if rb_key_prefix is None or f"{rb_key_prefix}_errors" not in st.session_state:

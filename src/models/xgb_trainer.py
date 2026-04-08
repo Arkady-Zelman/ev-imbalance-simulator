@@ -120,6 +120,11 @@ class TrainedXGBModels:
     training_timestamp: float = 0.0
     backtest_errors:    List[RollingErrorRow]  = field(default_factory=list)
     backtest_crossovers: List[CrossoverResult] = field(default_factory=list)
+    # Diagnostic fields — populated during training, drive the Model Diagnostics UI
+    # {lb_label: {h_sps: [(params_dict, val_score), ...]}} — all combos tried
+    grid_search_history: Dict[str, Dict[int, List[tuple]]] = field(default_factory=dict)
+    # {lb_label: {h_sps: train_mae}} — in-sample MAE of best combo (for overfitting gap)
+    train_scores: Dict[str, Dict[int, float]] = field(default_factory=dict)
 
 
 # ── Param combo generation ────────────────────────────────────────────────────
@@ -244,16 +249,22 @@ def _grid_search_single(
     X: np.ndarray,
     y: np.ndarray,
     param_combos: List[dict],
-) -> Tuple[dict, float]:
+) -> Tuple[dict, float, float, List[tuple]]:
     """
     Time-series-safe grid search: last 20% held out as validation.
     Scores each combo by worst-window MAE on the validation fold.
-    Returns (best_params, best_score).
+    Uses early stopping (20 rounds) to prevent overfitting per combo and
+    auto-select the optimal number of trees.
+
+    Returns (best_params, best_val_score, best_train_score, history).
+    history = [(params, val_score), ...] for every combo tried — used for
+    the parameter sensitivity diagnostics UI.
+    best_params has n_estimators overridden to the early-stopped optimum.
     """
     n = len(y)
     split = int(n * 0.8)
     if split < 20 or n - split < 5:
-        return param_combos[len(param_combos) // 2], float("inf")
+        return param_combos[len(param_combos) // 2], float("inf"), float("inf"), []
 
     X_tr, X_val = X[:split], X[split:]
     y_tr, y_val = y[:split], y[split:]
@@ -261,20 +272,47 @@ def _grid_search_single(
     device_kwargs = _get_device_kwargs()
     best_score = float("inf")
     best_params = param_combos[0]
+    best_ntrees = best_params.get("n_estimators", 200)
+    history: List[tuple] = []
 
     for params in param_combos:
-        model = xgb.XGBRegressor(
-            **params, **device_kwargs,
+        try:
+            model = xgb.XGBRegressor(
+                **params, **device_kwargs,
+                random_state=42, verbosity=0, n_jobs=1,
+            )
+            model.fit(
+                X_tr, y_tr,
+                eval_set=[(X_val, y_val)],
+                early_stopping_rounds=20,
+                verbose=False,
+            )
+            abs_err = np.abs(model.predict(X_val) - y_val)
+            score = _worst_window_mae(abs_err)
+            history.append((params, score))
+            if score < best_score:
+                best_score = score
+                best_params = params
+                best_ntrees = getattr(model, "best_ntree_limit", params.get("n_estimators", 200))
+        except Exception:
+            history.append((params, float("inf")))
+            continue
+
+    # Override n_estimators in best_params with the early-stopped optimum
+    best_params = {**best_params, "n_estimators": max(1, best_ntrees)}
+
+    # Compute in-sample (train-set) MAE for the winning params to expose overfitting gap
+    try:
+        train_model = xgb.XGBRegressor(
+            **best_params, **device_kwargs,
             random_state=42, verbosity=0, n_jobs=1,
         )
-        model.fit(X_tr, y_tr)
-        abs_err = np.abs(model.predict(X_val) - y_val)
-        score = _worst_window_mae(abs_err)
-        if score < best_score:
-            best_score = score
-            best_params = params
+        train_model.fit(X_tr, y_tr)
+        train_score = float(np.mean(np.abs(train_model.predict(X_tr) - y_tr)))
+    except Exception:
+        train_score = float("inf")
 
-    return best_params, best_score
+    return best_params, best_score, train_score, history
 
 
 # ── Full training pipeline ────────────────────────────────────────────────────
@@ -359,9 +397,11 @@ def train_xgb_models(
                 logger.info("Insufficient data for %s / %dd — skipping", lb_label, h_days)
                 continue
 
-            best_p, best_score = _grid_search_single(X, y, param_combos)
+            best_p, best_score, train_score, history = _grid_search_single(X, y, param_combos)
             result.best_params[lb_label][h_sps]  = best_p
             result.best_scores[lb_label][h_sps]  = best_score
+            result.train_scores.setdefault(lb_label, {})[h_sps] = train_score
+            result.grid_search_history.setdefault(lb_label, {})[h_sps] = history
 
             device_kwargs = _get_device_kwargs()
             final_model = xgb.XGBRegressor(
