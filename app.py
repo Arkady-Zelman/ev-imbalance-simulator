@@ -154,8 +154,8 @@ with st.sidebar:
         "Day-Ahead Price Assumption (£/MWh)",
         min_value=0.0, max_value=500.0,
         value=DEFAULT_DA_PRICE, step=5.0,
-        help=f"Default {DEFAULT_DA_PRICE} is a rough GB average. "
-             "After fetching MIP data you can auto-derive this below.",
+        help=f"Defaults to {DEFAULT_DA_PRICE} £/MWh. Automatically overridden with the mean MIP "
+             "over your selected date range when data is available.",
     )
 
     # ── Monte Carlo Settings ──────────────────────────────────────────
@@ -345,14 +345,11 @@ if run_clicked:
         st.error("No SIP data returned from ELEXON. Check your date range or network connection.")
         st.stop()
 
-    # Derive DA price from MIP if user left the default
+    # Derive DA price from MIP; auto-apply if user left the default
     mip_derived_da = derive_da_price_from_mip(mip_df)
     if mip_derived_da is not None and abs(da_price - DEFAULT_DA_PRICE) < 0.01:
-        st.info(
-            f"**Auto-derived DA price:** Mean MIP (EPEX SPOT/APXMIDP) over your date range is "
-            f"**£{mip_derived_da}/MWh** (your setting: £{da_price}/MWh). "
-            f"Consider updating the DA price input to match."
-        )
+        da_price = mip_derived_da
+        st.caption(f"Day-Ahead price auto-set to £{mip_derived_da}/MWh (mean MIP over selected date range).")
 
     with st.spinner(f"Running {n_runs:,} Monte Carlo simulations…"):
         sip_matrix, sip_is_fallback = prepare_sip_matrix(sip_df)
