@@ -534,7 +534,9 @@ def _backtest_with_final_models(
                 feat = _build_features(fc_target, idx, closest_h, fc_mip_feat, fc_aux)
                 if feat is None:
                     continue
-                feat = np.where(np.isnan(feat), cmeans, feat)
+                if len(feat) != getattr(model, "n_features_in_", len(feat)):
+                    continue  # stale model trained on different feature set — skip
+                feat = np.where(np.isnan(feat), cmeans, feat) if cmeans is not None and len(cmeans) == len(feat) else np.nan_to_num(feat, nan=0.0)
                 pred = float(model.predict(feat.reshape(1, -1))[0])
 
                 realised_d = _extract_realised(fc_target, idx, [h_sps])
@@ -660,7 +662,9 @@ def forecast_forward(
             feat = _build_features(fc_target, origin_idx, closest_h, fc_mip, fc_aux)
             if feat is None:
                 continue
-            feat = np.where(np.isnan(feat), cmeans, feat)
+            if len(feat) != getattr(model, "n_features_in_", len(feat)):
+                continue  # stale model trained on different feature set — skip
+            feat = np.where(np.isnan(feat), cmeans, feat) if cmeans is not None and len(cmeans) == len(feat) else np.nan_to_num(feat, nan=0.0)
             lb_forecasts[day] = float(model.predict(feat.reshape(1, -1))[0])
 
         result[lb_label] = lb_forecasts
@@ -720,10 +724,9 @@ def forecast_intraday_48sp(
             feat = _build_features(fc_target, virtual_idx, 48, fc_mip, fc_aux)
             if feat is None:
                 continue
-            if cmeans is not None:
-                feat = np.where(np.isnan(feat), cmeans, feat)
-            else:
-                feat = np.nan_to_num(feat, nan=0.0)
+            if len(feat) != getattr(model, "n_features_in_", len(feat)):
+                continue  # stale model trained on different feature set — skip
+            feat = np.where(np.isnan(feat), cmeans, feat) if cmeans is not None and len(cmeans) == len(feat) else np.nan_to_num(feat, nan=0.0)
             sp_fc[sp] = float(model.predict(feat.reshape(1, -1))[0])
 
         result_48[lb_label] = sp_fc
