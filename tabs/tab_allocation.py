@@ -32,6 +32,11 @@ from src.models.allocation_optimizer import (
     optimize_all_risk_profiles,
 )
 from src.models.forecaster import build_aligned_series
+from src.models.prophet_trainer import (
+    TrainedNPModels,
+    forecast_forward_np,
+    load_np_models,
+)
 from src.models.xgb_trainer import (
     forecast_forward,
     has_trained_models,
@@ -75,14 +80,31 @@ def _render_allocation_body(result) -> None:
     demand_df = st.session_state.get(DEMAND_DF)
     delivered_mw = result.delivered_mw  # (n_runs, 48)
 
+    # ── Forecast model selection ───────────────────────────────────────
+    st.markdown("---")
+    st.subheader("0. Forecast Model Selection")
+    col_s, col_m = st.columns(2)
+    with col_s:
+        sip_engine = st.selectbox(
+            "SIP forecast engine", ["XGBoost", "NeuralProphet"],
+            key="_alloc_sip_engine",
+            help="Which trained model to use for the SIP (balancing price) forecast.",
+        )
+    with col_m:
+        mip_engine = st.selectbox(
+            "MIP forecast engine", ["XGBoost", "NeuralProphet"],
+            key="_alloc_mip_engine",
+            help="Which trained model to use for the MIP (wholesale price) forecast.",
+        )
+
     # ── Load or prompt for trained models ─────────────────────────────
-    trained_sip = _ensure_model("sip", "Price (SIP)")
-    trained_mip = _ensure_model("mip", "Wholesale (MIP)")
+    trained_sip = _ensure_model("sip", "Price (SIP)", sip_engine)
+    trained_mip = _ensure_model("mip", "Wholesale (MIP)", mip_engine)
 
     if trained_sip is None and trained_mip is None:
         st.error(
             "At least one trained model (Price or Wholesale) is required. "
-            "Go to the **Rolling Backtest** tab and train an XGBoost model first."
+            "Go to the **Rolling Backtest** tab and train an XGBoost or NeuralProphet model first."
         )
         return
 
@@ -533,37 +555,55 @@ def _render_allocation_body(result) -> None:
 """)
 
 
-def _ensure_model(target: str, label: str):
-    """Load model from session or disk."""
-    ss_key = f"_xgb_trained_models_{target}"
-    trained = st.session_state.get(ss_key)
-    if trained is None:
-        trained = load_trained_models(target=target)
-        if trained is not None:
-            st.session_state[ss_key] = trained
-    if trained is not None and trained.final_models:
-        ts = dt.datetime.fromtimestamp(trained.training_timestamp)
-        st.caption(f"{label} model: trained **{ts:%Y-%m-%d %H:%M}**")
+def _ensure_model(target: str, label: str, engine: str = "XGBoost"):
+    """Load model from session or disk for the given engine (XGBoost or NeuralProphet)."""
+    if engine == "NeuralProphet":
+        ss_key = f"_np_trained_models_{target}"
+        trained = st.session_state.get(ss_key)
+        if trained is None:
+            trained = load_np_models(target=target)
+            if trained is not None:
+                st.session_state[ss_key] = trained
+        if trained is not None and trained.forward_forecasts:
+            ts = dt.datetime.fromtimestamp(trained.training_timestamp)
+            st.caption(f"{label} model: NeuralProphet — trained **{ts:%Y-%m-%d %H:%M}**")
+        else:
+            st.caption(f"{label} model: NeuralProphet — not yet trained")
+            trained = None
+        return trained
     else:
-        st.caption(f"{label} model: not yet trained")
-        trained = None
-    return trained
+        ss_key = f"_xgb_trained_models_{target}"
+        trained = st.session_state.get(ss_key)
+        if trained is None:
+            trained = load_trained_models(target=target)
+            if trained is not None:
+                st.session_state[ss_key] = trained
+        if trained is not None and trained.final_models:
+            ts = dt.datetime.fromtimestamp(trained.training_timestamp)
+            st.caption(f"{label} model: XGBoost — trained **{ts:%Y-%m-%d %H:%M}**")
+        else:
+            st.caption(f"{label} model: XGBoost — not yet trained")
+            trained = None
+        return trained
 
 
 def _build_48sp_forecast(
     trained, sip_values, mip_values, demand_values, target_label: str,
 ) -> np.ndarray | None:
     """
-    Build a 48-SP (one day) forecast from a trained XGBoost model.
+    Build a 48-SP (one day) forecast from a trained XGBoost or NeuralProphet model.
     Uses the day-1 forward forecast and repeats it across all 48 SPs.
     Falls back to last observed day if model is not available.
     """
     if trained is None:
         return None
 
-    forecasts = forecast_forward(
-        trained, sip_values, mip_values, demand_values, n_days=1,
-    )
+    if isinstance(trained, TrainedNPModels):
+        forecasts = forecast_forward_np(trained)
+    else:
+        forecasts = forecast_forward(
+            trained, sip_values, mip_values, demand_values, n_days=1,
+        )
     if not forecasts:
         return None
 

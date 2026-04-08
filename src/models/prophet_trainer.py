@@ -468,6 +468,74 @@ def train_np_models(
     return result
 
 
+# ── Parallel training for multiple NP targets ─────────────────────────────────
+
+@dataclass
+class ParallelNPTrainingResult:
+    """Results from simultaneously training multiple NeuralProphet targets."""
+    models: Dict[str, "TrainedNPModels"]  # target -> trained
+    errors: Dict[str, str]                # target -> error message if failed
+    elapsed_seconds: float
+
+
+def train_all_np_parallel(
+    sip_series: pd.Series,
+    mip_series: pd.Series,
+    demand_series: Optional[pd.Series] = None,
+    targets: Optional[List[str]] = None,
+    param_search_mode: Literal["grid", "random"] = "grid",
+    random_search_samples: int = 6,
+    progress_callbacks: Optional[Dict[str, Callable[[float, str], None]]] = None,
+) -> "ParallelNPTrainingResult":
+    """
+    Train up to 3 NeuralProphet models (sip, mip, demand) simultaneously using
+    a ThreadPoolExecutor. NeuralProphet releases the GIL during PyTorch training,
+    so threads achieve meaningful parallelism on multi-core machines.
+
+    Trained models are saved to disk automatically on success.
+    """
+    import concurrent.futures
+    import time as _time
+
+    if targets is None:
+        targets = ["sip", "mip"]
+        if demand_series is not None:
+            targets.append("demand")
+
+    result_models: Dict[str, TrainedNPModels] = {}
+    result_errors: Dict[str, str] = {}
+    t0 = _time.time()
+
+    def _train_one(tgt: str) -> TrainedNPModels:
+        cb = (progress_callbacks or {}).get(tgt)
+        return train_np_models(
+            sip_series, mip_series,
+            demand_series=demand_series,
+            target=tgt,
+            progress_callback=cb,
+            param_search_mode=param_search_mode,
+            random_search_samples=random_search_samples,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as ex:
+        fut_map = {ex.submit(_train_one, t): t for t in targets}
+        for fut in concurrent.futures.as_completed(fut_map):
+            tgt = fut_map[fut]
+            try:
+                trained = fut.result()
+                result_models[tgt] = trained
+                save_np_models(trained, target=tgt)
+            except Exception as exc:
+                logger.warning("NP parallel training failed for %s: %s", tgt, exc)
+                result_errors[tgt] = str(exc)
+
+    return ParallelNPTrainingResult(
+        models=result_models,
+        errors=result_errors,
+        elapsed_seconds=_time.time() - t0,
+    )
+
+
 def _pick_global_best_np(
     best_params: Dict[str, dict],
     best_scores: Optional[Dict[str, float]] = None,
@@ -546,9 +614,13 @@ def _np_holdout_backtest(
         origin_abs = start + split
 
         # Generate multi-step predictions using the stored model
+        # Cap periods to n_forecasts — model was trained with min(holdout, _MAX_EVAL_HORIZON)
+        # so requesting more periods than n_forecasts causes a NeuralProphet error.
         try:
+            model_n_fc = getattr(model, 'n_forecasts', holdout_len)
+            periods_to_predict = min(holdout_len, model_n_fc)
             future = model.make_future_dataframe(
-                df=model.history, periods=holdout_len, n_historic_predictions=False,
+                df=model.history, periods=periods_to_predict, n_historic_predictions=False,
             )
             forecast_df = model.predict(future)
         except Exception as exc:
@@ -564,7 +636,7 @@ def _np_holdout_backtest(
 
         # Collect predicted values at each step in the holdout
         pred_vals = []
-        for col in yhat_cols[:holdout_len]:
+        for col in yhat_cols[:periods_to_predict]:
             series = forecast_df[col].dropna()
             if not series.empty:
                 pred_vals.append(float(series.iloc[-1]))
@@ -575,7 +647,7 @@ def _np_holdout_backtest(
             h_days = h_sps // 48
             # Holdout step index (0-based within holdout)
             step_idx_h = h_sps - 1  # h_sps steps ahead → index h_sps-1 in holdout
-            if step_idx_h >= len(pred_vals) or step_idx_h >= holdout_len:
+            if step_idx_h >= len(pred_vals) or step_idx_h >= periods_to_predict:
                 continue
             if origin_abs + h_sps >= n:
                 continue

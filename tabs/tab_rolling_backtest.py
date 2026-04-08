@@ -39,6 +39,7 @@ from src.models.prophet_trainer import (
     has_np_models,
     load_np_models,
     save_np_models,
+    train_all_np_parallel,
     train_np_models,
 )
 from src.models.xgb_trainer import (
@@ -285,89 +286,6 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
 
-        # ── Train All 4 Models Simultaneously ─────────────────────────────
-        st.markdown("---")
-        st.subheader("Train All 4 Models Simultaneously")
-        st.caption(
-            "Trains SIP · MIP · Demand · Generation in parallel. "
-            "Select a single **Lookback Window** above to keep runtime manageable."
-        )
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            para_deep = st.button(
-                "🏋️ All 4 — In-Depth",
-                use_container_width=True, type="primary", key="rb_para_deep",
-                help="150-sample grid search per model. Best accuracy; takes several minutes.",
-            )
-        with col_p2:
-            para_quick = st.button(
-                "⚡ All 4 — Quick",
-                use_container_width=True, key="rb_para_quick",
-                help="30-sample random search per model. Fast point-in-time tuning.",
-            )
-
-        para_mode: Optional[str] = "grid" if para_deep else ("random" if para_quick else None)
-
-        if para_mode is not None:
-            with st.spinner("Aligning series for parallel training…"):
-                sip_series_p, mip_series_p, demand_series_p, _ = build_aligned_series(
-                    sip_df, mip_df, demand_df=demand_df,
-                )
-            n_days_p = len(sip_series_p) // 48
-            if n_days_p < 45:
-                st.error(
-                    f"Need at least 45 days of aligned data. "
-                    f"Currently have {n_days_p} days. Increase the date range."
-                )
-            else:
-                para_targets = ["sip", "mip"]
-                if has_demand:
-                    para_targets.append("demand")
-                if has_gen:
-                    para_targets.append("total_generation")
-
-                _target_labels = {
-                    "sip": "Price (SIP)", "mip": "Wholesale (MIP)",
-                    "demand": "Demand", "total_generation": "Generation",
-                }
-
-                para_bars = {t: st.progress(0.0, text=_target_labels.get(t, t))
-                             for t in para_targets}
-
-                _st_ctx = get_script_run_ctx()
-
-                def _make_para_cb(tgt: str):
-                    def _cb(frac: float, msg: str) -> None:
-                        add_script_run_ctx(threading.current_thread(), _st_ctx)
-                        para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
-                    return _cb
-
-                para_cbs = {t: _make_para_cb(t) for t in para_targets}
-
-                with st.spinner(f"Training {len(para_targets)} models in parallel…"):
-                    para_result = train_all_xgb_parallel(
-                        sip_series=sip_series_p,
-                        mip_series=mip_series_p,
-                        demand_series=demand_series_p if has_demand else None,
-                        gen_series=gen_series_rb,
-                        targets=para_targets,
-                        param_search_mode=para_mode,
-                        selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
-                        progress_callbacks=para_cbs,
-                    )
-
-                for t, trained_p in para_result.models.items():
-                    st.session_state[f"_xgb_trained_models_{t}"] = trained_p
-                for t, err in para_result.errors.items():
-                    st.error(f"{_target_labels.get(t, t)} training failed: {err}")
-
-                ok_targets = list(para_result.models.keys())
-                if ok_targets:
-                    st.success(
-                        f"Parallel training complete in {para_result.elapsed_seconds:.0f}s — "
-                        f"trained: {', '.join(_target_labels.get(t, t) for t in ok_targets)}"
-                    )
-
     elif method_key == "neuralprophet":
         # ── NeuralProphet: full training workflow (mirrors XGBoost) ──────────
         target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
@@ -539,6 +457,163 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_crossovers"] = crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
             st.success(f"Rolling backtest complete — {len(errors)} configurations evaluated.")
+
+    # ── Train All Models Simultaneously ───────────────────────────────
+    st.markdown("---")
+    st.subheader("Train All Models Simultaneously")
+
+    _target_labels_all = {
+        "sip": "Price (SIP)", "mip": "Wholesale (MIP)",
+        "demand": "Demand", "total_generation": "Generation",
+    }
+
+    # XGBoost — all 4 targets
+    st.caption(
+        "**XGBoost** — Trains SIP · MIP · Demand · Generation in parallel. "
+        "Select a single **Lookback Window** above to keep runtime manageable."
+    )
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        para_deep = st.button(
+            "🏋️ All 4 XGB — In-Depth",
+            use_container_width=True, type="primary", key="rb_para_deep",
+            help="150-sample grid search per model. Best accuracy; takes several minutes.",
+        )
+    with col_p2:
+        para_quick = st.button(
+            "⚡ All 4 XGB — Quick",
+            use_container_width=True, key="rb_para_quick",
+            help="30-sample random search per model. Fast point-in-time tuning.",
+        )
+
+    para_mode: Optional[str] = "grid" if para_deep else ("random" if para_quick else None)
+
+    if para_mode is not None:
+        with st.spinner("Aligning series for XGBoost parallel training…"):
+            sip_series_p, mip_series_p, demand_series_p, _ = build_aligned_series(
+                sip_df, mip_df, demand_df=demand_df,
+            )
+        n_days_p = len(sip_series_p) // 48
+        if n_days_p < 45:
+            st.error(
+                f"Need at least 45 days of aligned data. "
+                f"Currently have {n_days_p} days. Increase the date range."
+            )
+        else:
+            para_targets = ["sip", "mip"]
+            if has_demand:
+                para_targets.append("demand")
+            if has_gen:
+                para_targets.append("total_generation")
+
+            para_bars = {t: st.progress(0.0, text=_target_labels_all.get(t, t))
+                         for t in para_targets}
+
+            _st_ctx = get_script_run_ctx()
+
+            def _make_para_cb(tgt: str):
+                def _cb(frac: float, msg: str) -> None:
+                    add_script_run_ctx(threading.current_thread(), _st_ctx)
+                    para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                return _cb
+
+            para_cbs = {t: _make_para_cb(t) for t in para_targets}
+
+            with st.spinner(f"Training {len(para_targets)} XGBoost models in parallel…"):
+                para_result = train_all_xgb_parallel(
+                    sip_series=sip_series_p,
+                    mip_series=mip_series_p,
+                    demand_series=demand_series_p if has_demand else None,
+                    gen_series=gen_series_rb,
+                    targets=para_targets,
+                    param_search_mode=para_mode,
+                    selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
+                    progress_callbacks=para_cbs,
+                )
+
+            for t, trained_p in para_result.models.items():
+                st.session_state[f"_xgb_trained_models_{t}"] = trained_p
+            for t, err in para_result.errors.items():
+                st.error(f"{_target_labels_all.get(t, t)} XGB training failed: {err}")
+
+            ok_targets = list(para_result.models.keys())
+            if ok_targets:
+                st.success(
+                    f"XGBoost parallel training complete in {para_result.elapsed_seconds:.0f}s — "
+                    f"trained: {', '.join(_target_labels_all.get(t, t) for t in ok_targets)}"
+                )
+
+    # NeuralProphet — all 3 targets
+    st.caption(
+        "**NeuralProphet** — Trains SIP · MIP · Demand in parallel. "
+        "Slower than XGBoost — 'Quick' is recommended for first runs."
+    )
+    col_np1, col_np2 = st.columns(2)
+    with col_np1:
+        np_para_deep = st.button(
+            "🏋️ All 3 NP — In-Depth",
+            use_container_width=True, type="primary", key="rb_np_para_deep",
+            help="18-combo grid search per model. Best accuracy; takes many minutes.",
+        )
+    with col_np2:
+        np_para_quick = st.button(
+            "⚡ All 3 NP — Quick",
+            use_container_width=True, key="rb_np_para_quick",
+            help="3 random combos per model. Fast estimate for point-in-time tuning.",
+        )
+
+    np_para_mode: Optional[str] = "grid" if np_para_deep else ("random" if np_para_quick else None)
+
+    if np_para_mode is not None:
+        with st.spinner("Aligning series for NeuralProphet parallel training…"):
+            sip_series_np, mip_series_np, demand_series_np, _ = build_aligned_series(
+                sip_df, mip_df, demand_df=demand_df,
+            )
+        n_days_np = len(sip_series_np) // 48
+        if n_days_np < 45:
+            st.error(
+                f"Need at least 45 days of aligned data. "
+                f"Currently have {n_days_np} days. Increase the date range."
+            )
+        else:
+            np_para_targets = ["sip", "mip"]
+            if has_demand:
+                np_para_targets.append("demand")
+
+            np_para_bars = {t: st.progress(0.0, text=_target_labels_all.get(t, t))
+                            for t in np_para_targets}
+
+            _st_ctx_np = get_script_run_ctx()
+
+            def _make_np_para_cb(tgt: str):
+                def _cb(frac: float, msg: str) -> None:
+                    add_script_run_ctx(threading.current_thread(), _st_ctx_np)
+                    np_para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                return _cb
+
+            np_para_cbs = {t: _make_np_para_cb(t) for t in np_para_targets}
+
+            with st.spinner(f"Training {len(np_para_targets)} NeuralProphet models in parallel…"):
+                np_para_result = train_all_np_parallel(
+                    sip_series=sip_series_np,
+                    mip_series=mip_series_np,
+                    demand_series=demand_series_np if has_demand else None,
+                    targets=np_para_targets,
+                    param_search_mode=np_para_mode,
+                    progress_callbacks=np_para_cbs,
+                )
+
+            for t, trained_np_p in np_para_result.models.items():
+                st.session_state[f"_np_trained_models_{t}"] = trained_np_p
+            for t, err in np_para_result.errors.items():
+                st.error(f"{_target_labels_all.get(t, t)} NP training failed: {err}")
+
+            ok_np = list(np_para_result.models.keys())
+            if ok_np:
+                st.success(
+                    f"NeuralProphet parallel training complete in {np_para_result.elapsed_seconds:.0f}s — "
+                    f"trained: {', '.join(_target_labels_all.get(t, t) for t in ok_np)}"
+                )
 
     # ── Results ───────────────────────────────────────────────────────
     rb_key_prefix = st.session_state.get("_rb_last_key")
