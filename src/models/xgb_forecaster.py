@@ -80,9 +80,13 @@ def _build_features(
 
     feats: list[float] = [sp_sin, sp_cos, dow_sin, dow_cos, h_sin, h_cos, tsp_sin, tsp_cos]
 
-    # Target lags: 1d / 2d / 7d
-    for off in (48, 96, 336):
-        feats.append(target_values[idx - off] if idx - off >= 0 else np.nan)
+    # Target lags: 1d / 2d / 7d / 14d / 28d
+    lag_1d = target_values[idx - 48]  if idx - 48  >= 0 else np.nan
+    lag_2d = target_values[idx - 96]  if idx - 96  >= 0 else np.nan
+    lag_7d = target_values[idx - 336] if idx - 336 >= 0 else np.nan
+    lag_14d = target_values[idx - 672]  if idx - 672  >= 0 else np.nan
+    lag_28d = target_values[idx - 1344] if idx - 1344 >= 0 else np.nan
+    feats += [lag_1d, lag_2d, lag_7d, lag_14d, lag_28d]
 
     # Rolling stats over last 24h
     w48 = target_values[max(0, idx - 48):idx]
@@ -98,6 +102,41 @@ def _build_features(
         feats += [float(np.nanmean(w336)), float(np.nanstd(w336))]
     else:
         feats += [np.nan, np.nan]
+
+    # Rolling mean over last 14d
+    w672 = target_values[max(0, idx - 672):idx]
+    feats.append(float(np.nanmean(w672)) if len(w672) > 0 else np.nan)
+
+    # Trend slope: linear regression coefficient over last 48 SPs
+    if len(w48) >= 4:
+        x_slope = np.arange(len(w48), dtype=np.float32)
+        feats.append(float(np.polyfit(x_slope, w48.astype(np.float32), 1)[0]))
+    else:
+        feats.append(np.nan)
+
+    # is_weekend binary flag
+    feats.append(1.0 if day_of_week >= 5 else 0.0)
+
+    # EMA proxy over last 7d (geometrically-weighted average)
+    if len(w336) >= 2:
+        alpha = 0.02  # decay factor per SP ≈ 1 - exp(-1/(50)) for ~50-SP half-life
+        weights = (1 - alpha) ** np.arange(len(w336) - 1, -1, -1, dtype=np.float64)
+        ema_val = float(np.average(w336, weights=weights))
+    else:
+        ema_val = np.nan
+    feats.append(ema_val)
+
+    # Lag ratio: lag_1d / lag_7d (relative level — mean-reversion signal)
+    if not (np.isnan(lag_1d) or np.isnan(lag_7d) or lag_7d == 0.0):
+        feats.append(float(lag_1d / lag_7d))
+    else:
+        feats.append(np.nan)
+
+    # Price momentum: lag_1d - lag_2d (last 24h directional move)
+    if not (np.isnan(lag_1d) or np.isnan(lag_2d)):
+        feats.append(float(lag_1d - lag_2d))
+    else:
+        feats.append(np.nan)
 
     # MIP features (only meaningful when forecasting SIP)
     if mip_values is not None:

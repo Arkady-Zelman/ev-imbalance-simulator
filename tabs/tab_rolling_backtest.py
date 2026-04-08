@@ -686,7 +686,13 @@ def _render_rolling_backtest_body() -> None:
                                     "Lookback": lb,
                                     "Horizon (d)": h_sps // 48,
                                 })
-                if hist_rows:
+                if not hist_rows:
+                    st.info(
+                        "No valid parameter combinations recorded. "
+                        "This usually means early stopping failed during training. "
+                        "Retrain the model to populate this chart."
+                    )
+                else:
                     df_hist = pd.DataFrame(hist_rows)
                     param_cols = [c for c in df_hist.columns
                                   if c not in ("val_score", "Lookback", "Horizon (d)")]

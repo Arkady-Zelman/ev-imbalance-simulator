@@ -67,17 +67,18 @@ def _model_file(target: str = "sip") -> Path:
 # (~4^12 combos), so random search is used for both modes.
 
 GRID = {
-    "n_estimators":      [100, 200, 400, 800],  # floored at 100; lr=0.01+100 still learns
-    "max_depth":         [3, 4, 5, 6, 7],
-    "learning_rate":     [0.01, 0.05, 0.1, 0.2],
-    "subsample":         [0.6, 0.8, 1.0],
-    "colsample_bytree":  [0.6, 0.8, 1.0],
+    "n_estimators":      [100, 200, 400],              # removed 800 — early stopping selects optimal depth
+    "max_depth":         [3, 4, 5, 6],                 # removed 7 — too prone to overfit
+    "learning_rate":     [0.005, 0.01, 0.05, 0.1],    # added 0.005 for slow-learn + high-reg combos
+    "subsample":         [0.5, 0.6, 0.8, 1.0],        # added 0.5 for stronger stochasticity
+    "colsample_bytree":  [0.5, 0.6, 0.8, 1.0],        # added 0.5
     "colsample_bylevel": [0.6, 0.8, 1.0],
     "colsample_bynode":  [0.6, 0.8, 1.0],
-    "reg_alpha":         [0.0, 0.01, 0.1, 1.0],
-    "reg_lambda":        [0.1, 0.5, 1.0, 5.0],
-    "gamma":             [0.0, 0.05, 0.1, 0.5],
-    "min_child_weight":  [1, 3, 5, 10],
+    "reg_alpha":         [0.0, 0.1, 1.0, 5.0, 10.0],  # extended ceiling for L1 regularisation
+    "reg_lambda":        [1.0, 5.0, 10.0, 20.0],      # raised floor + extended ceiling for L2
+    "gamma":             [0.0, 0.1, 0.5, 1.0, 2.0],   # extended for stronger split penalty
+    "min_child_weight":  [3, 5, 10, 20, 50],           # shifted up — penalise small-leaf overfitting
+    "objective":         ["reg:squarederror", "reg:pseudohubererror"],  # huber robust to price spikes
     # max_delta_step omitted — only meaningful for class-imbalance classification
 }
 
@@ -279,12 +280,12 @@ def _grid_search_single(
         try:
             model = xgb.XGBRegressor(
                 **params, **device_kwargs,
+                early_stopping_rounds=20,   # must be in constructor for XGBoost ≥3.x
                 random_state=42, verbosity=0, n_jobs=1,
             )
             model.fit(
                 X_tr, y_tr,
                 eval_set=[(X_val, y_val)],
-                early_stopping_rounds=20,
                 verbose=False,
             )
             abs_err = np.abs(model.predict(X_val) - y_val)
@@ -293,7 +294,7 @@ def _grid_search_single(
             if score < best_score:
                 best_score = score
                 best_params = params
-                best_ntrees = getattr(model, "best_ntree_limit", params.get("n_estimators", 200))
+                best_ntrees = getattr(model, "best_iteration", None) or params.get("n_estimators", 200)
         except Exception:
             history.append((params, float("inf")))
             continue
@@ -665,6 +666,69 @@ def forecast_forward(
         result[lb_label] = lb_forecasts
 
     return result
+
+
+def forecast_intraday_48sp(
+    trained: "TrainedXGBModels",
+    sip_values: np.ndarray,
+    mip_values: Optional[np.ndarray] = None,
+    demand_values: Optional[np.ndarray] = None,
+    gen_values: Optional[np.ndarray] = None,
+) -> Dict[str, np.ndarray]:
+    """
+    Generate a true 48-SP intraday day-ahead forecast for each lookback horizon.
+
+    Uses the offset trick on the existing h=48 model — no retraining required.
+
+    For each SP s (0-indexed, 0..47):
+        virtual_idx = end_idx - 48 + s
+        horizon     = 48
+        → predicts target[virtual_idx + 48] = target[end_idx + s]  ← tomorrow's SP s
+
+    SP-of-day cyclical features vary naturally with virtual_idx, so the model
+    predicts each settlement period distinctly (not just a flat scaled value).
+
+    Returns {lookback_label: np.ndarray(48,)}.
+    """
+    if not _HAS_XGB:
+        return {}
+
+    target = getattr(trained, "target", "sip")
+    try:
+        fc_target, fc_mip, fc_aux = _route_series(
+            target, sip_values, mip_values, demand_values, gen_values
+        )
+    except ValueError:
+        return {}
+
+    end_idx = len(fc_target)
+    result_48: Dict[str, np.ndarray] = {}
+
+    for lb_label, lb_models in trained.final_models.items():
+        if not lb_models:
+            continue
+        # Use 1-day model (h=48) — closest match to "tomorrow"
+        h_key = 48 if 48 in lb_models else min(lb_models.keys())
+        model  = lb_models[h_key]
+        cmeans = trained.col_means.get(lb_label, {}).get(h_key)
+
+        sp_fc = np.full(48, np.nan)
+        for sp in range(48):
+            virtual_idx = end_idx - 48 + sp
+            if virtual_idx < 336:   # need ≥7 days of history for 7-day lag features
+                continue
+            feat = _build_features(fc_target, virtual_idx, 48, fc_mip, fc_aux)
+            if feat is None:
+                continue
+            if cmeans is not None:
+                feat = np.where(np.isnan(feat), cmeans, feat)
+            else:
+                feat = np.nan_to_num(feat, nan=0.0)
+            sp_fc[sp] = float(model.predict(feat.reshape(1, -1))[0])
+
+        result_48[lb_label] = sp_fc
+
+    return result_48
 
 
 # ── Parallel multi-target training ───────────────────────────────────────────
