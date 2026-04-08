@@ -454,10 +454,51 @@ from tabs.tab_rolling_backtest import render as render_rolling_bt
 from tabs.tab_allocation import render as render_allocation
 from tabs.tab_dispatch_engine import render as render_dispatch
 
-# ── Tab styling: indent secondary tabs ────────────────────────────────────
+# ── Tab styling: group labels + secondary indent ──────────────────────────
 st.markdown("""
 <style>
-/* Push the secondary tab group (5th button onwards) rightward */
+/* Room for the group-label row above the tab buttons */
+.stTabs [data-baseweb="tab-list"] {
+    padding-top: 22px;
+    position: relative;
+}
+
+/* All tab buttons need position:relative so ::before is anchored to them */
+.stTabs [data-baseweb="tab-list"] button[role="tab"] {
+    position: relative;
+}
+
+/* "Trading Tools" label above the first tab */
+.stTabs [data-baseweb="tab-list"] button[role="tab"]:nth-of-type(1)::before {
+    content: "Trading Tools";
+    position: absolute;
+    top: -18px;
+    left: 0;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(250,250,250,0.45);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* "Analytics" label above the first secondary tab (5th) */
+.stTabs [data-baseweb="tab-list"] button[role="tab"]:nth-of-type(5)::before {
+    content: "Analytics";
+    position: absolute;
+    top: -18px;
+    left: 0;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(250,250,250,0.45);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* Gap between the two groups */
 .stTabs [data-baseweb="tab-list"] button[role="tab"]:nth-of-type(5) {
     margin-left: 24px;
 }
