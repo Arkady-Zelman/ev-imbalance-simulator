@@ -454,7 +454,20 @@ from tabs.tab_rolling_backtest import render as render_rolling_bt
 from tabs.tab_allocation import render as render_allocation
 from tabs.tab_dispatch_engine import render as render_dispatch
 
+# ── Tab styling: indent secondary tabs ────────────────────────────────────
+st.markdown("""
+<style>
+/* Push the secondary tab group (5th button onwards) rightward */
+.stTabs [data-baseweb="tab-list"] button[role="tab"]:nth-of-type(5) {
+    margin-left: 24px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 tabs = st.tabs([
+    "⚖️ Allocation Optimizer",
+    "📉 Rolling Backtest",
+    "🎯 Dispatch Engine",
     "📊 Executive Summary",
     "🔌 Portfolio Availability",
     "🎲 Monte Carlo Results",
@@ -463,35 +476,32 @@ tabs = st.tabs([
     "🌡️ Scenario Comparison",
     "📈 Historical SIP Explorer",
     "🔮 Forecast Backtesting",
-    "📉 Rolling Backtest",
-    "⚖️ Allocation Optimizer",
-    "🎯 Dispatch Engine",
     "📚 Data Sources & Methodology",
 ])
 
 has_results = RESULT in st.session_state
 
 with tabs[0]:
-    render_executive(has_results)
-with tabs[1]:
-    render_portfolio(has_results)
-with tabs[2]:
-    render_mc(has_results)
-with tabs[3]:
-    render_risk(has_results)
-with tabs[4]:
-    render_sensitivity(has_results)
-with tabs[5]:
-    render_scenario(has_results)
-with tabs[6]:
-    render_sip_explorer(has_results)
-with tabs[7]:
-    render_backtesting(has_results)
-with tabs[8]:
-    render_rolling_bt(has_results)
-with tabs[9]:
     render_allocation(has_results)
-with tabs[10]:
+with tabs[1]:
+    render_rolling_bt(has_results)
+with tabs[2]:
     render_dispatch(has_results)
+with tabs[3]:
+    render_executive(has_results)
+with tabs[4]:
+    render_portfolio(has_results)
+with tabs[5]:
+    render_mc(has_results)
+with tabs[6]:
+    render_risk(has_results)
+with tabs[7]:
+    render_sensitivity(has_results)
+with tabs[8]:
+    render_scenario(has_results)
+with tabs[9]:
+    render_sip_explorer(has_results)
+with tabs[10]:
+    render_backtesting(has_results)
 with tabs[11]:
     render_data_sources()
