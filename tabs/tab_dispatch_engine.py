@@ -63,7 +63,7 @@ _ACTION_EMOJI = {
 def render(has_results: bool) -> None:
     st.header("Dispatch Decision Engine")
     st.caption(
-        "Forecasts GB system supply (wind / thermal / interconnectors), demand, "
+        "Forecasts GB system supply (thermal / interconnectors / storage), demand, "
         "SIP, and MIP over a 1-day or 10-day horizon, then recommends whether to "
         "hold gate-closure commitment, increase, or reduce charging."
     )
@@ -293,7 +293,6 @@ def _render_generation_chart(
 
     # Historical stacked area
     for label, values, colour in [
-        ("Wind",           gen_breakdown.wind_mw[-lookback_n:],          "#4CAF50"),
         ("Thermal",        gen_breakdown.thermal_mw[-lookback_n:],       "#FF9800"),
         ("Interconnector", gen_breakdown.interconnector_mw[-lookback_n:], "#9C27B0"),
         ("Storage",        gen_breakdown.storage_mw[-lookback_n:],       "#2196F3"),
@@ -315,7 +314,6 @@ def _render_generation_chart(
 
     # Forecast generation (total line)
     fcast_dts  = [r.forecast_datetime for r in sp_recs]
-    fcast_wind = [r.wind_forecast_mw  for r in sp_recs]
     fcast_thm  = [r.thermal_forecast_mw for r in sp_recs]
     fcast_itn  = [r.interconnector_forecast_mw for r in sp_recs]
     fcast_gen  = [r.total_gen_forecast_mw for r in sp_recs]
@@ -425,7 +423,6 @@ def _render_sp_table(sp_recs: list[DispatchRecommendation]) -> None:
             "SBP (£/MWh)":  f"{r.sbp_forecast:.1f}",
             "SSP (£/MWh)":  f"{r.ssp_forecast:.1f}",
             "MIP (£/MWh)":  f"{r.mip_forecast:.1f}",
-            "Wind (MW)":    f"{r.wind_forecast_mw:,.0f}",
             "Action":       _ACTION_EMOJI[r.action],
             "P&L/MW (£)":   f"{r.pnl_delta_per_mw:.3f}",
         })
@@ -448,7 +445,7 @@ def _render_daily_heatmap(daily_summaries: list[DailyDispatchSummary]) -> None:
         x=dates, y=nivsann, marker_color=cols,
         name="Mean NIV (MW)",
         hovertext=[
-            f"{_STANCE_EMOJI[s]} {s} | Wind {d.wind_pct:.0f}%<br>"
+            f"{_STANCE_EMOJI[s]} {s}<br>"
             f"NIV={n:+,.0f} MW | SBP=£{d.mean_sbp:.1f} MIP=£{d.mean_mip:.1f}<br>"
             f"P&L opp £{p:,.0f}/MW/day | Strong SPs: {d.n_strong_signal_sps}/48"
             for s, n, p, d in zip(stances, nivsann, pnls, daily_summaries)
@@ -483,7 +480,6 @@ def _render_daily_table(daily_summaries: list[DailyDispatchSummary]) -> None:
             "Date":              d.date,
             "Stance":            _STANCE_EMOJI.get(d.system_stance, "") + " " + d.system_stance,
             "Mean NIV (MW)":     f"{d.mean_niv_mw:+,.0f}",
-            "Wind %":            f"{d.wind_pct:.0f}%",
             "Thermal %":         f"{d.thermal_pct:.0f}%",
             "Interconnector %":  f"{d.interconnector_pct:.0f}%",
             "Mean SBP (£/MWh)":  f"{d.mean_sbp:.1f}",

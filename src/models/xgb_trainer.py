@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -96,28 +97,15 @@ _WORST_WINDOW_SPS = 48 * 3  # 3-day window
 
 _DEVICE_PROBED = False
 _XGB_DEVICE_KWARGS: dict = {}
+_DEVICE_LOCK = threading.Lock()
 
 
 def _get_device_kwargs() -> dict:
     """
-    Returns {"device": "cuda"} if XGBoost CUDA GPU support is available,
-    otherwise returns {} (CPU). Result is cached after the first call.
+    Returns {} (CPU). GPU training is disabled to prevent VRAM exhaustion
+    when 4 models train in parallel. Re-enable by restoring the CUDA probe.
     """
-    global _DEVICE_PROBED, _XGB_DEVICE_KWARGS
-    if _DEVICE_PROBED:
-        return _XGB_DEVICE_KWARGS
-    _DEVICE_PROBED = True
-    if not _HAS_XGB:
-        return {}
-    try:
-        probe = xgb.XGBRegressor(device="cuda", n_estimators=1, verbosity=0)
-        probe.fit(np.array([[1.0]]), np.array([1.0]))
-        _XGB_DEVICE_KWARGS = {"device": "cuda"}
-        logger.info("XGBoost: CUDA GPU detected — using GPU acceleration.")
-    except Exception:
-        _XGB_DEVICE_KWARGS = {}
-        logger.info("XGBoost: no CUDA GPU found — using CPU.")
-    return _XGB_DEVICE_KWARGS
+    return {}
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -169,7 +157,6 @@ def _route_series(
     mip_v: np.ndarray,
     demand_v: Optional[np.ndarray],
     gen_v: Optional[np.ndarray] = None,
-    wind_v: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Returns (target_series, mip_feature, aux_feature) for _build_train_data
@@ -179,7 +166,6 @@ def _route_series(
     MIP              → target=MIP,    mip_feature=None, aux=SIP
     demand           → target=demand, mip_feature=None, aux=SIP
     total_generation → target=gen,    mip_feature=None, aux=demand
-    wind             → target=wind,   mip_feature=None, aux=demand
     """
     if target == "demand":
         if demand_v is None:
@@ -191,10 +177,6 @@ def _route_series(
         if gen_v is None:
             raise ValueError("gen_series required when target='total_generation'")
         return gen_v, None, demand_v
-    if target == "wind":
-        if wind_v is None:
-            raise ValueError("wind_series required when target='wind'")
-        return wind_v, None, demand_v
     # default: sip
     return sip_v, mip_v, demand_v
 
@@ -306,7 +288,6 @@ def train_xgb_models(
     param_search_mode: Literal["grid", "random"] = "grid",
     random_search_samples: int = 30,
     gen_series: Optional[pd.Series] = None,
-    wind_series: Optional[pd.Series] = None,
     selected_lookback: Optional[str] = None,
 ) -> TrainedXGBModels:
     """
@@ -319,11 +300,10 @@ def train_xgb_models(
 
     Parameters
     ----------
-    target : "sip", "demand", "mip", "total_generation", or "wind".
+    target : "sip", "demand", "mip", or "total_generation".
     param_search_mode : "grid" (150 samples, in-depth) or "random" (n samples, quick).
     progress_callback : Optional (fraction, message) callback for progress bars.
     gen_series  : Required when target="total_generation".
-    wind_series : Required when target="wind".
     """
     if not _HAS_XGB:
         raise RuntimeError("xgboost is not installed")
@@ -337,14 +317,13 @@ def train_xgb_models(
     mip_v    = mip_series.values.astype(float)
     demand_v = demand_series.values.astype(float) if demand_series is not None else None
     gen_v    = gen_series.values.astype(float)   if gen_series   is not None else None
-    wind_v   = wind_series.values.astype(float)  if wind_series  is not None else None
 
     train_target, train_mip, train_aux = _route_series(
-        target, sip_v, mip_v, demand_v, gen_v, wind_v
+        target, sip_v, mip_v, demand_v, gen_v
     )
     target_desc = {
         "demand": "Demand", "mip": "Wholesale (MIP)",
-        "total_generation": "Total Generation", "wind": "Wind Generation",
+        "total_generation": "Total Generation",
     }.get(target, "SIP")
 
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
@@ -400,7 +379,7 @@ def train_xgb_models(
         )
 
     errors, crossovers = _backtest_with_final_models(
-        result, sip_series, mip_series, demand_series, gen_series, wind_series, target
+        result, sip_series, mip_series, demand_series, gen_series, target
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
@@ -452,7 +431,6 @@ def _backtest_with_final_models(
     mip_series: pd.Series,
     demand_series: Optional[pd.Series],
     gen_series: Optional[pd.Series],
-    wind_series: Optional[pd.Series],
     target: str,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
     """
@@ -474,14 +452,12 @@ def _backtest_with_final_models(
     demand_v = demand_series.values.astype(float) if demand_series is not None else None
     gen_v    = (gen_series.reindex(sip_series.index).ffill().bfill().values.astype(float)
                 if gen_series is not None else None)
-    wind_v   = (wind_series.reindex(sip_series.index).ffill().bfill().values.astype(float)
-                if wind_series is not None else None)
 
     fc_target, fc_mip_feat, fc_aux = _route_series(
-        target, sip_v, mip_v, demand_v, gen_v, wind_v
+        target, sip_v, mip_v, demand_v, gen_v
     )
 
-    if target in ("total_generation", "wind"):
+    if target == "total_generation":
         benchmark_v: Optional[np.ndarray] = None
     elif target == "demand":
         benchmark_v = demand_v
@@ -527,7 +503,7 @@ def _backtest_with_final_models(
                 fc_errs.append(abs(pred - r))
                 realised_vals.append(r)
 
-                if target in ("total_generation", "wind"):
+                if target == "total_generation":
                     persist_idx = idx + h_sps - 48
                     if persist_idx >= 0:
                         mkt_errs.append(abs(float(fc_target[persist_idx]) - r))
@@ -606,7 +582,6 @@ def forecast_forward(
     demand_values: Optional[np.ndarray] = None,
     n_days: int = 14,
     gen_values: Optional[np.ndarray] = None,
-    wind_values: Optional[np.ndarray] = None,
 ) -> Dict[str, Dict[int, float]]:
     """
     Produce forward forecasts from the end of available data.
@@ -619,7 +594,7 @@ def forecast_forward(
     target = getattr(trained, "target", "sip")
     try:
         fc_target, fc_mip, fc_aux = _route_series(
-            target, sip_values, mip_values, demand_values, gen_values, wind_values
+            target, sip_values, mip_values, demand_values, gen_values
         )
     except ValueError:
         return {}
@@ -670,7 +645,6 @@ def train_all_xgb_parallel(
     mip_series: pd.Series,
     demand_series: Optional[pd.Series] = None,
     gen_series: Optional[pd.Series] = None,
-    wind_series: Optional[pd.Series] = None,
     targets: Optional[List[str]] = None,
     param_search_mode: Literal["grid", "random"] = "grid",
     selected_lookback: Optional[str] = None,
@@ -706,7 +680,6 @@ def train_all_xgb_parallel(
             mip_series=mip_series,
             demand_series=demand_series,
             gen_series=gen_series,
-            wind_series=wind_series,
             target=tgt,
             progress_callback=cbs.get(tgt),
             param_search_mode=param_search_mode,
@@ -760,6 +733,15 @@ def load_trained_models(target: str = "sip") -> Optional[TrainedXGBModels]:
     try:
         trained = joblib.load(fpath)
         if isinstance(trained, TrainedXGBModels):
+            # Force CPU inference: models may have been saved with device="cuda".
+            # GPU prediction is unnecessary for the small forward-forecast workload
+            # and can crash when 4 parallel training threads exhausted VRAM.
+            for lb_models in trained.final_models.values():
+                for model in lb_models.values():
+                    try:
+                        model.set_params(device="cpu")
+                    except Exception:
+                        pass
             logger.info("Loaded XGB models (%s) from %s", target, fpath)
             return trained
         return None

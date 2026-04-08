@@ -9,11 +9,13 @@ The crossover point marks the maximum exploitable forecast horizon.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +97,7 @@ def _render_rolling_backtest_body() -> None:
         if has_demand:
             target_options.append("Demand")
         if has_gen:
-            target_options.extend(["Total Generation", "Wind"])
+            target_options.append("Total Generation")
         target_label = st.radio(
             "Forecast target",
             target_options,
@@ -107,7 +109,6 @@ def _render_rolling_backtest_body() -> None:
             "Wholesale (MIP)": "mip",
             "Demand": "demand",
             "Total Generation": "total_generation",
-            "Wind": "wind",
         }[target_label]
     with col2:
         method_options = ["TOD Mean", "EWMA", "XGBoost", "NeuralProphet"]
@@ -147,7 +148,7 @@ def _render_rolling_backtest_body() -> None:
     if target_key == "demand" and not has_demand:
         st.warning("No demand data available. Run a simulation with demand data first.")
         return
-    if target_key in ("total_generation", "wind") and not has_gen:
+    if target_key == "total_generation" and not has_gen:
         st.warning("No generation data available. Run a simulation first.")
         return
 
@@ -156,15 +157,12 @@ def _render_rolling_backtest_body() -> None:
         "mip": "Wholesale (MIP)",
         "demand": "Demand",
         "total_generation": "Total Generation",
-        "wind": "Wind",
     }
 
-    # Build gen/wind pd.Series aligned to breakdown index (if available)
+    # Build gen pd.Series aligned to breakdown index (if available)
     gen_series_rb: pd.Series | None = None
-    wind_series_rb: pd.Series | None = None
     if gen_breakdown is not None:
-        gen_series_rb  = pd.Series(gen_breakdown.total_mw, index=gen_breakdown.index)
-        wind_series_rb = pd.Series(gen_breakdown.wind_mw,  index=gen_breakdown.index)
+        gen_series_rb = pd.Series(gen_breakdown.total_mw, index=gen_breakdown.index)
 
     # ── XGBoost: Train / Show Results workflow ────────────────────────
     if method_key == "xgb":
@@ -239,7 +237,6 @@ def _render_rolling_backtest_body() -> None:
                     progress_callback=_progress,
                     param_search_mode=search_mode,
                     gen_series=gen_series_rb,
-                    wind_series=wind_series_rb,
                     selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
                 )
             except Exception as exc:
@@ -337,8 +334,11 @@ def _render_rolling_backtest_body() -> None:
                 para_bars = {t: st.progress(0.0, text=_target_labels.get(t, t))
                              for t in para_targets}
 
+                _st_ctx = get_script_run_ctx()
+
                 def _make_para_cb(tgt: str):
                     def _cb(frac: float, msg: str) -> None:
+                        add_script_run_ctx(threading.current_thread(), _st_ctx)
                         para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
                     return _cb
 
@@ -532,7 +532,6 @@ def _render_rolling_backtest_body() -> None:
                     target=target_key,
                     demand_series=demand_series,
                     gen_series=gen_series_rb,
-                    wind_series=wind_series_rb,
                 )
 
             rb_key_prefix = f"_rb_{target_key}_{method_key}"
@@ -551,7 +550,7 @@ def _render_rolling_backtest_body() -> None:
     crossovers = st.session_state[f"{rb_key_prefix}_crossovers"]
 
     is_demand = rb_key_prefix and "_demand_" in rb_key_prefix
-    is_gen = rb_key_prefix and ("_total_generation_" in rb_key_prefix or "_wind_" in rb_key_prefix)
+    is_gen = rb_key_prefix and "_total_generation_" in rb_key_prefix
     unit = "MW" if (is_demand or is_gen) else "£/MWh"
     is_mip = rb_key_prefix and "_mip_" in rb_key_prefix
 

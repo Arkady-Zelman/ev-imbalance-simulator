@@ -81,7 +81,6 @@ class DispatchRecommendation:
     horizon_sp: int                   # SPs ahead from forecast origin
     forecast_datetime: pd.Timestamp
     # ── Forecast values ──
-    wind_forecast_mw: float
     thermal_forecast_mw: float
     interconnector_forecast_mw: float
     total_gen_forecast_mw: float
@@ -102,7 +101,6 @@ class DailyDispatchSummary:
     """Per-day rollup for the 10-day lookahead view."""
     date: str
     mean_niv_mw: float
-    wind_pct: float                   # wind as % of total generation forecast
     thermal_pct: float
     interconnector_pct: float
     mean_sbp: float
@@ -313,7 +311,6 @@ def compute_dispatch_recommendations(
         sbp  = float(fc_sbp[i])
         ssp  = float(fc_ssp[i])
         mip  = float(fc_mip[i])
-        wind = float(fc_wind[i])
         thm  = float(fc_thermal[i])
         itn  = float(fc_intercon[i])
         gen  = float(fc_total_gen[i])
@@ -358,7 +355,6 @@ def compute_dispatch_recommendations(
         sp_recs.append(DispatchRecommendation(
             horizon_sp=h,
             forecast_datetime=dt_sp,
-            wind_forecast_mw=wind,
             thermal_forecast_mw=thm,
             interconnector_forecast_mw=itn,
             total_gen_forecast_mw=gen,
@@ -385,7 +381,6 @@ def compute_dispatch_recommendations(
         date_str = day_recs[0].forecast_datetime.strftime("%Y-%m-%d")
         niv_arr  = np.array([r.niv_forecast_mw for r in day_recs])
         gen_arr  = np.array([r.total_gen_forecast_mw for r in day_recs])
-        wind_arr = np.array([r.wind_forecast_mw for r in day_recs])
         thm_arr  = np.array([r.thermal_forecast_mw for r in day_recs])
         itn_arr  = np.array([r.interconnector_forecast_mw for r in day_recs])
         sbp_arr  = np.array([r.sbp_forecast for r in day_recs])
@@ -394,7 +389,6 @@ def compute_dispatch_recommendations(
         actions  = [r.action for r in day_recs]
 
         safe_gen = np.where(gen_arr < 1.0, 1.0, gen_arr)
-        wind_pct = float(np.mean(wind_arr / safe_gen * 100))
         thm_pct  = float(np.mean(thm_arr  / safe_gen * 100))
         itn_pct  = float(np.mean(itn_arr  / safe_gen * 100))
 
@@ -418,7 +412,6 @@ def compute_dispatch_recommendations(
         daily_summaries.append(DailyDispatchSummary(
             date=date_str,
             mean_niv_mw=float(np.mean(niv_arr)),
-            wind_pct=wind_pct,
             thermal_pct=thm_pct,
             interconnector_pct=itn_pct,
             mean_sbp=float(np.mean(sbp_arr)),

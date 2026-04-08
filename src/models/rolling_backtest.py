@@ -80,7 +80,6 @@ def run_rolling_backtest(
     np_params: Optional[Dict] = None,
     da_series: Optional[pd.Series] = None,
     gen_series: Optional[pd.Series] = None,
-    wind_series: Optional[pd.Series] = None,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
     """
     Run the full rolling backtest across all lookback × horizon combos.
@@ -90,10 +89,9 @@ def run_rolling_backtest(
 
     Parameters
     ----------
-    target : "sip", "demand", "mip", "total_generation", or "wind".
+    target : "sip", "demand", "mip", or "total_generation".
     demand_series : Half-hourly demand (feature for SIP/MIP; target for demand).
     gen_series    : Half-hourly total generation (MW). Required for target="total_generation".
-    wind_series   : Half-hourly wind generation (MW). Required for target="wind".
     xgb_params    : Optional XGBRegressor kwargs for method="xgb".
     np_params     : Optional NeuralProphet constructor kwargs for method="neuralprophet".
 
@@ -106,14 +104,10 @@ def run_rolling_backtest(
     mip_values    = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series  is not None else None
     da_values     = da_series.values.astype(float)    if da_series      is not None else None
-    # Reindex gen/wind onto the SIP index so integer offsets align correctly
+    # Reindex gen onto the SIP index so integer offsets align correctly
     gen_values = (
         gen_series.reindex(sip_series.index).ffill().bfill().values.astype(float)
         if gen_series is not None else None
-    )
-    wind_values = (
-        wind_series.reindex(sip_series.index).ffill().bfill().values.astype(float)
-        if wind_series is not None else None
     )
 
     if target == "demand":
@@ -130,12 +124,6 @@ def run_rolling_backtest(
             logger.warning("total_generation target requested but no gen data provided.")
             return [], []
         target_values    = gen_values
-        benchmark_values = None   # persistence benchmark computed per-SP below
-    elif target == "wind":
-        if wind_values is None:
-            logger.warning("wind target requested but no wind data provided.")
-            return [], []
-        target_values    = wind_values
         benchmark_values = None   # persistence benchmark computed per-SP below
     else:
         target_values    = sip_values
@@ -180,9 +168,9 @@ def run_rolling_backtest(
                             demand_values=demand_values,
                             xgb_params=xgb_params,
                         )
-                    elif target in ("total_generation", "wind"):
-                        # Generation/wind: target series is gen or wind; SIP as price feature
-                        tgt_v = gen_values if target == "total_generation" else wind_values
+                    elif target == "total_generation":
+                        # Generation: target series is gen; SIP as price feature
+                        tgt_v = gen_values
                         fc = _xgb_forecast(
                             tgt_v, idx, lb_sps, [h_sps],  # type: ignore[arg-type]
                             mip_values=sip_values, demand_values=demand_values,
@@ -204,9 +192,9 @@ def run_rolling_backtest(
 
                 realised = _extract_realised(target_values, idx, [h_sps])
 
-                # For gen/wind: use 1-day-ago same-SP persistence as the naive benchmark
+                # For total_generation: use 1-day-ago same-SP persistence as the naive benchmark
                 # (no external forward curve exists for generation).
-                if target in ("total_generation", "wind"):
+                if target == "total_generation":
                     persist_idx = idx + h_sps - 48
                     if persist_idx >= 0:
                         market_fwd = {h_sps: float(target_values[persist_idx])}
