@@ -350,3 +350,64 @@ def fetch_generation_outturn(date_from: dt.date, date_to: dt.date) -> pd.DataFra
 
 def gen_cache_timestamp(date_from: dt.date, date_to: dt.date) -> Optional[float]:
     return cache_manager.cache_timestamp(f"fuelhh_{date_from}_{date_to}")
+
+
+# ── Derived helpers (no additional API calls) ───────────────────────────────
+
+def extract_niv_series(sip_df: pd.DataFrame) -> Optional[pd.Series]:
+    """
+    Extract Net Imbalance Volume from the already-fetched SIP DataFrame.
+
+    NIV > 0: system is long (over-generation) → downward pressure on SIP.
+    NIV < 0: system is short (under-generation) → upward pressure on SIP.
+
+    Returns a pd.Series with timezone-naive datetime index matching
+    build_aligned_series() output, or None if netImbalanceVolume is absent.
+    """
+    if sip_df.empty or "netImbalanceVolume" not in sip_df.columns:
+        return None
+    df = sip_df.copy()
+    df["datetime"] = pd.to_datetime(df["settlementDate"]) + pd.to_timedelta(
+        (df["settlementPeriod"].astype(int) - 1) * 30, unit="min"
+    )
+    niv = df.set_index("datetime")["netImbalanceVolume"].sort_index()
+    niv = niv[~niv.index.duplicated(keep="first")]
+    return niv
+
+
+def pivot_generation_wide(gen_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    Pivot the FUELHH long DataFrame to wide format with a datetime index.
+
+    Returns a DataFrame with columns:
+        wind_gen_mw     — metered wind generation
+        nuclear_gen_mw  — nuclear generation (stable baseload)
+        ccgt_gen_mw     — combined-cycle gas turbine (gas burn proxy)
+        net_imports_mw  — sum of all INT* interconnector flows (positive = imports into GB)
+
+    Index: timezone-naive datetime matching build_aligned_series() output.
+    Returns None if gen_df is empty.
+    """
+    if gen_df.empty:
+        return None
+
+    df = gen_df.copy()
+    df["datetime"] = pd.to_datetime(df["settlementDate"]) + pd.to_timedelta(
+        (df["settlementPeriod"].astype(int) - 1) * 30, unit="min"
+    )
+
+    wide = df.pivot_table(
+        index="datetime", columns="fuelType",
+        values="generation", aggfunc="first",
+    ).fillna(0.0)
+
+    _z = pd.Series(0.0, index=wide.index)
+    result = pd.DataFrame(index=wide.index)
+    result["wind_gen_mw"]    = wide.get("WIND",    _z)
+    result["nuclear_gen_mw"] = wide.get("NUCLEAR", _z)
+    result["ccgt_gen_mw"]    = wide.get("CCGT",    _z)
+
+    int_cols = [c for c in wide.columns if str(c).startswith("INT")]
+    result["net_imports_mw"] = wide[int_cols].sum(axis=1) if int_cols else 0.0
+
+    return result[~result.index.duplicated(keep="first")].sort_index()

@@ -51,7 +51,118 @@ from src.models.xgb_trainer import (
     train_xgb_models,
 )
 from src.models.dispatch_engine import process_generation_outturn
-from src.session_keys import DEMAND_DF, GEN_DF, MIP_DF, SELECTED_LOOKBACK, SIP_DF
+from src.session_keys import DEMAND_DF, EXOG_SERIES, GEN_DF, MIP_DF, SELECTED_LOOKBACK, SIP_DF
+
+
+# ── Exogenous series builder ──────────────────────────────────────────────────
+
+def _build_exog_series(
+    sip_df: pd.DataFrame,
+    gen_df_raw,
+    gen_breakdown,
+    use_wind_gen: bool,
+    use_nuclear: bool,
+    use_ccgt: bool,
+    use_net_imp: bool,
+    use_niv: bool,
+    use_temp: bool,
+    use_wind_spd: bool,
+    use_solar: bool,
+    use_cloud: bool,
+    use_wind_fc: bool,
+    use_dem_fc: bool,
+) -> dict:
+    """
+    Build a dict of {name: pd.Series} for each enabled exogenous variable.
+    All series use a timezone-naive datetime index (matching build_aligned_series output).
+    """
+    import datetime as dt
+    from src.data.elexon_client import extract_niv_series, pivot_generation_wide
+
+    exog: dict = {}
+
+    # ── From already-fetched generation data ──
+    if gen_df_raw is not None and not gen_df_raw.empty:
+        try:
+            gen_wide = pivot_generation_wide(gen_df_raw)
+            if use_wind_gen and "wind_gen_mw" in gen_wide.columns:
+                exog["wind_gen_mw"] = gen_wide["wind_gen_mw"].dropna()
+            if use_nuclear and "nuclear_gen_mw" in gen_wide.columns:
+                exog["nuclear_gen_mw"] = gen_wide["nuclear_gen_mw"].dropna()
+            if use_ccgt and "ccgt_gen_mw" in gen_wide.columns:
+                exog["ccgt_gen_mw"] = gen_wide["ccgt_gen_mw"].dropna()
+            if use_net_imp and "net_imports_mw" in gen_wide.columns:
+                exog["net_imports_mw"] = gen_wide["net_imports_mw"].dropna()
+        except Exception as exc:
+            logger.warning("Could not pivot generation data for exog: %s", exc)
+
+    # ── NIV from SIP DataFrame ──
+    if use_niv and sip_df is not None and not sip_df.empty:
+        try:
+            niv = extract_niv_series(sip_df)
+            if niv is not None and not niv.empty:
+                exog["niv"] = niv
+        except Exception as exc:
+            logger.warning("Could not extract NIV series: %s", exc)
+
+    # ── Weather + ELEXON forecasts (new fetches) ──
+    needs_weather = use_temp or use_wind_spd or use_solar or use_cloud
+    needs_wind_fc = use_wind_fc
+    needs_dem_fc  = use_dem_fc
+
+    if needs_weather or needs_wind_fc or needs_dem_fc:
+        # Determine date range from SIP data
+        try:
+            if hasattr(sip_df.index, "get_level_values"):
+                dates = sip_df.index.get_level_values("settlementDate")
+            else:
+                dates = sip_df.index
+            date_from = pd.Timestamp(dates.min()).date()
+            date_to   = pd.Timestamp(dates.max()).date()
+            # Extend forward by a few days for forecast coverage
+            date_to_ext = date_to + dt.timedelta(days=2)
+        except Exception:
+            date_from = dt.date.today() - dt.timedelta(days=90)
+            date_to_ext = dt.date.today() + dt.timedelta(days=2)
+
+        if needs_weather:
+            try:
+                from src.data.weather_client import fetch_weather_data
+                with st.spinner("Fetching weather data (Open-Meteo)…"):
+                    wx = fetch_weather_data(date_from, date_to_ext)
+                if not wx.empty:
+                    if use_temp and "temperature_c" in wx.columns:
+                        exog["temperature_c"] = wx["temperature_c"].dropna()
+                    if use_wind_spd and "wind_speed_100m" in wx.columns:
+                        exog["wind_speed_100m"] = wx["wind_speed_100m"].dropna()
+                    if use_solar and "solar_radiation" in wx.columns:
+                        exog["solar_radiation"] = wx["solar_radiation"].dropna()
+                    if use_cloud and "cloud_cover_pct" in wx.columns:
+                        exog["cloud_cover_pct"] = wx["cloud_cover_pct"].dropna()
+            except Exception as exc:
+                logger.warning("Weather fetch failed: %s", exc)
+
+        if needs_wind_fc:
+            try:
+                from src.data.weather_client import fetch_wind_generation_forecast
+                with st.spinner("Fetching ELEXON wind generation forecast…"):
+                    wfc = fetch_wind_generation_forecast(date_from, date_to_ext)
+                if not wfc.empty and "wind_fc_mw" in wfc.columns:
+                    exog["wind_fc_mw"] = wfc["wind_fc_mw"].dropna()
+            except Exception as exc:
+                logger.warning("WINDFOR fetch failed: %s", exc)
+
+        if needs_dem_fc:
+            try:
+                from src.data.weather_client import fetch_demand_forecast
+                with st.spinner("Fetching ELEXON demand forecast…"):
+                    dfc = fetch_demand_forecast(date_from, date_to_ext)
+                if not dfc.empty and "demand_fc_mw" in dfc.columns:
+                    exog["demand_fc_mw"] = dfc["demand_fc_mw"].dropna()
+            except Exception as exc:
+                logger.warning("NDFD fetch failed: %s", exc)
+
+    return exog
 
 
 def render(has_results: bool) -> None:
@@ -165,6 +276,53 @@ def _render_rolling_backtest_body() -> None:
     if gen_breakdown is not None:
         gen_series_rb = pd.Series(gen_breakdown.total_mw, index=gen_breakdown.index)
 
+    # ── Exogenous Variables (XGBoost only) ───────────────────────────
+    exog_series_for_training: dict | None = None
+    if method_key == "xgb":
+        with st.expander("Exogenous Variables", expanded=False):
+            st.caption(
+                "Additional signals passed to XGBoost as features. "
+                "All sources are free and require no API key."
+            )
+            st.markdown("**Already available (no extra fetch)**")
+            c1, c2 = st.columns(2)
+            with c1:
+                use_wind_gen  = st.checkbox("Wind generation (ELEXON FUELHH)", value=True, key="exog_wind_gen")
+                use_nuclear   = st.checkbox("Nuclear generation (ELEXON FUELHH)", value=True, key="exog_nuclear")
+                use_ccgt      = st.checkbox("CCGT/gas generation — gas proxy (ELEXON FUELHH)", value=True, key="exog_ccgt")
+            with c2:
+                use_net_imp   = st.checkbox("Net interconnector imports (ELEXON FUELHH)", value=True, key="exog_net_imp")
+                use_niv       = st.checkbox("Net Imbalance Volume (ELEXON SIP)", value=True, key="exog_niv")
+            st.markdown("**Live fetches (Open-Meteo · ELEXON)**")
+            c3, c4 = st.columns(2)
+            with c3:
+                use_temp      = st.checkbox("Temperature °C (Open-Meteo ERA5/forecast)", value=True, key="exog_temp")
+                use_wind_spd  = st.checkbox("Wind speed 100 m (Open-Meteo)", value=True, key="exog_wind_spd")
+                use_solar     = st.checkbox("Solar radiation W/m² (Open-Meteo)", value=True, key="exog_solar")
+                use_cloud     = st.checkbox("Cloud cover % (Open-Meteo)", value=False, key="exog_cloud")
+            with c4:
+                use_wind_fc   = st.checkbox("Day-ahead wind forecast MW (ELEXON WINDFOR)", value=True, key="exog_wind_fc")
+                use_dem_fc    = st.checkbox("Day-ahead demand forecast MW (ELEXON NDFD)", value=True, key="exog_dem_fc")
+
+        # Build exog_series dict from checked boxes
+        exog_series_for_training = _build_exog_series(
+            sip_df=sip_df,
+            gen_df_raw=gen_df_raw,
+            gen_breakdown=gen_breakdown,
+            use_wind_gen=use_wind_gen,
+            use_nuclear=use_nuclear,
+            use_ccgt=use_ccgt,
+            use_net_imp=use_net_imp,
+            use_niv=use_niv,
+            use_temp=use_temp,
+            use_wind_spd=use_wind_spd,
+            use_solar=use_solar,
+            use_cloud=use_cloud,
+            use_wind_fc=use_wind_fc,
+            use_dem_fc=use_dem_fc,
+        )
+        st.session_state[EXOG_SERIES] = exog_series_for_training
+
     # ── XGBoost: Train / Show Results workflow ────────────────────────
     if method_key == "xgb":
         target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
@@ -239,6 +397,7 @@ def _render_rolling_backtest_body() -> None:
                     param_search_mode=search_mode,
                     gen_series=gen_series_rb,
                     selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
+                    exog_series=exog_series_for_training or None,
                 )
             except Exception as exc:
                 st.error(f"XGBoost training failed: {exc}")
@@ -529,6 +688,7 @@ def _render_rolling_backtest_body() -> None:
                     param_search_mode=para_mode,
                     selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
                     progress_callbacks=para_cbs,
+                    exog_series=st.session_state.get(EXOG_SERIES) or None,
                 )
 
             for t, trained_p in para_result.models.items():

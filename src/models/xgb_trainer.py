@@ -126,6 +126,8 @@ class TrainedXGBModels:
     grid_search_history: Dict[str, Dict[int, List[tuple]]] = field(default_factory=dict)
     # {lb_label: {h_sps: train_mae}} — in-sample MAE of best combo (for overfitting gap)
     train_scores: Dict[str, Dict[int, float]] = field(default_factory=dict)
+    # Ordered list of exogenous series keys used during training (for inference alignment)
+    exog_keys: List[str] = field(default_factory=list)
 
 
 # ── Param combo generation ────────────────────────────────────────────────────
@@ -153,6 +155,20 @@ def _build_param_combos(
     """
     n = _N_SAMPLES["grid"] if mode == "grid" else max(1, n_random)
     return _generate_random_combos(n_samples=n, seed=seed)
+
+
+# ── Exogenous series alignment ────────────────────────────────────────────────
+
+def _align_to_target(target: pd.Series, exog: pd.Series) -> np.ndarray:
+    """
+    Reindex exog Series to target's datetime index.
+    Forward-fills up to 4 consecutive missing periods (2 hours), then fills
+    any remaining NaN with the series mean (or 0 if entirely missing).
+    Returns a float32 numpy array of the same length as target.
+    """
+    aligned = exog.reindex(target.index).ffill(limit=4)
+    fill_val = float(aligned.mean()) if not pd.isna(aligned.mean()) else 0.0
+    return aligned.fillna(fill_val).to_numpy(dtype=np.float32)
 
 
 # ── Target routing ────────────────────────────────────────────────────────────
@@ -195,6 +211,7 @@ def _build_train_data(
     horizon_sps: int,
     mip_values: Optional[np.ndarray],
     demand_values: Optional[np.ndarray],
+    exog_dict: Optional[Dict[str, np.ndarray]] = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Build feature matrix and target vector for a given (lookback, horizon).
@@ -213,7 +230,7 @@ def _build_train_data(
     for i in range(train_start, end_idx):
         if i + horizon_sps >= n:
             break
-        feat = _build_features(target_values, i, horizon_sps, mip_values, demand_values)
+        feat = _build_features(target_values, i, horizon_sps, mip_values, demand_values, exog_dict)
         if feat is None:
             continue
         X_rows.append(feat)
@@ -328,6 +345,7 @@ def train_xgb_models(
     random_search_samples: int = 30,
     gen_series: Optional[pd.Series] = None,
     selected_lookback: Optional[str] = None,
+    exog_series: Optional[Dict[str, pd.Series]] = None,
 ) -> TrainedXGBModels:
     """
     Full training pipeline:
@@ -365,7 +383,23 @@ def train_xgb_models(
         "total_generation": "Total Generation",
     }.get(target, "SIP")
 
+    # Build exog_dict: align each exogenous Series to the target series index
+    target_series_for_align = {
+        "demand": demand_series, "mip": mip_series,
+        "total_generation": gen_series,
+    }.get(target, sip_series)
+    if target_series_for_align is None:
+        target_series_for_align = sip_series
+
+    exog_dict: Optional[Dict[str, np.ndarray]] = None
+    if exog_series:
+        exog_dict = {
+            k: _align_to_target(target_series_for_align, s)
+            for k, s in exog_series.items()
+        }
+
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
+    result.exog_keys = list(exog_series.keys()) if exog_series else []
 
     if selected_lookback and selected_lookback in ROLLING_LOOKBACKS:
         lookbacks = [(selected_lookback, ROLLING_LOOKBACKS[selected_lookback])]
@@ -392,7 +426,7 @@ def train_xgb_models(
                 )
 
             X, y, cmeans = _build_train_data(
-                train_target, lb_sps, h_sps, train_mip, train_aux,
+                train_target, lb_sps, h_sps, train_mip, train_aux, exog_dict,
             )
             if X is None:
                 logger.info("Insufficient data for %s / %dd — skipping", lb_label, h_days)
@@ -420,7 +454,7 @@ def train_xgb_models(
         )
 
     errors, crossovers = _backtest_with_final_models(
-        result, sip_series, mip_series, demand_series, gen_series, target
+        result, sip_series, mip_series, demand_series, gen_series, target, exog_series
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
@@ -473,6 +507,7 @@ def _backtest_with_final_models(
     demand_series: Optional[pd.Series],
     gen_series: Optional[pd.Series],
     target: str,
+    exog_series: Optional[Dict[str, pd.Series]] = None,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
     """
     Rolling backtest using pre-trained final models — predict-only, no re-training.
@@ -497,6 +532,20 @@ def _backtest_with_final_models(
     fc_target, fc_mip_feat, fc_aux = _route_series(
         target, sip_v, mip_v, demand_v, gen_v
     )
+
+    # Align exog series to the target series index for backtest predictions
+    bt_exog_dict: Optional[Dict[str, np.ndarray]] = None
+    if exog_series:
+        target_series_for_align = {
+            "demand": demand_series, "mip": mip_series,
+            "total_generation": gen_series,
+        }.get(target, sip_series)
+        if target_series_for_align is None:
+            target_series_for_align = sip_series
+        bt_exog_dict = {
+            k: _align_to_target(target_series_for_align, s)
+            for k, s in exog_series.items()
+        }
 
     if target == "total_generation":
         benchmark_v: Optional[np.ndarray] = None
@@ -531,7 +580,7 @@ def _backtest_with_final_models(
             realised_vals: list = []
 
             for idx in range(start_idx, end_idx, step):
-                feat = _build_features(fc_target, idx, closest_h, fc_mip_feat, fc_aux)
+                feat = _build_features(fc_target, idx, closest_h, fc_mip_feat, fc_aux, bt_exog_dict)
                 if feat is None:
                     continue
                 if len(feat) != getattr(model, "n_features_in_", len(feat)):
@@ -625,6 +674,7 @@ def forecast_forward(
     demand_values: Optional[np.ndarray] = None,
     n_days: int = 14,
     gen_values: Optional[np.ndarray] = None,
+    exog_dict: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, Dict[int, float]]:
     """
     Produce forward forecasts from the end of available data.
@@ -659,7 +709,7 @@ def forecast_forward(
 
             # Build features using closest_h (the horizon this model was trained on)
             # so that cyclical horizon features and target-SP encoding match training.
-            feat = _build_features(fc_target, origin_idx, closest_h, fc_mip, fc_aux)
+            feat = _build_features(fc_target, origin_idx, closest_h, fc_mip, fc_aux, exog_dict)
             if feat is None:
                 continue
             if len(feat) != getattr(model, "n_features_in_", len(feat)):
@@ -678,6 +728,7 @@ def forecast_intraday_48sp(
     mip_values: Optional[np.ndarray] = None,
     demand_values: Optional[np.ndarray] = None,
     gen_values: Optional[np.ndarray] = None,
+    exog_dict: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Generate a true 48-SP intraday day-ahead forecast for each lookback horizon.
@@ -721,7 +772,7 @@ def forecast_intraday_48sp(
             virtual_idx = end_idx - 48 + sp
             if virtual_idx < 336:   # need ≥7 days of history for 7-day lag features
                 continue
-            feat = _build_features(fc_target, virtual_idx, 48, fc_mip, fc_aux)
+            feat = _build_features(fc_target, virtual_idx, 48, fc_mip, fc_aux, exog_dict)
             if feat is None:
                 continue
             if len(feat) != getattr(model, "n_features_in_", len(feat)):
@@ -756,6 +807,7 @@ def train_all_xgb_parallel(
     param_search_mode: Literal["grid", "random"] = "grid",
     selected_lookback: Optional[str] = None,
     progress_callbacks: Optional[Dict[str, Callable[[float, str], None]]] = None,
+    exog_series: Optional[Dict[str, pd.Series]] = None,
 ) -> ParallelTrainingResult:
     """
     Train up to 4 XGB models simultaneously using a ThreadPoolExecutor.
@@ -791,6 +843,7 @@ def train_all_xgb_parallel(
             progress_callback=cbs.get(tgt),
             param_search_mode=param_search_mode,
             selected_lookback=selected_lookback,
+            exog_series=exog_series,
         )
 
     with _TPE(max_workers=len(targets)) as ex:

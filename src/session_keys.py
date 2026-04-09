@@ -25,3 +25,4 @@ DEMAND_DF = "demand_df"
 GEN_DF = "gen_df"
 SELECTED_LOOKBACK = "selected_lookback"        # Optional[str] — e.g. "5 days"
 MULTI_PROFILE_RESULTS = "multi_profile_results"  # MultiProfileResult
+EXOG_SERIES = "exog_series"                      # Optional[Dict[str, pd.Series]]

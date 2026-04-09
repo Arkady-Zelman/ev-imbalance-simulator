@@ -39,10 +39,36 @@ from src.models.prophet_trainer import (
 )
 from src.models.xgb_trainer import (
     forecast_forward,
+    forecast_intraday_48sp,
     has_trained_models,
     load_trained_models,
 )
-from src.session_keys import DEMAND_DF, MIP_DF, MULTI_PROFILE_RESULTS, RESULT, SIP_DF
+from src.session_keys import DEMAND_DF, EXOG_SERIES, MIP_DF, MULTI_PROFILE_RESULTS, RESULT, SIP_DF
+
+
+def _build_exog_dict_for_forecast(
+    trained,
+    target_series: "pd.Series",
+) -> "Optional[Dict[str, np.ndarray]]":
+    """
+    Reconstruct the exog_dict for inference from session-state exog_series.
+    Aligns each stored pd.Series to the target series index.
+    Returns None if no exog series are stored or model has no exog_keys.
+    """
+    from src.models.xgb_trainer import TrainedXGBModels, _align_to_target
+    if not isinstance(trained, TrainedXGBModels):
+        return None
+    exog_keys = getattr(trained, "exog_keys", [])
+    if not exog_keys:
+        return None
+    stored: dict = st.session_state.get(EXOG_SERIES) or {}
+    if not stored:
+        return None
+    result_dict: dict = {}
+    for k in exog_keys:
+        if k in stored:
+            result_dict[k] = _align_to_target(target_series, stored[k])
+    return result_dict if result_dict else None
 
 
 def render(has_results: bool) -> None:
@@ -108,7 +134,7 @@ def _render_allocation_body(result) -> None:
         )
         return
 
-    # ── Build aligned series and forecasts ────────────────────────────
+    # ── Build aligned series ───────────────────────────────────────────
     sip_series, mip_series, demand_series, _ = build_aligned_series(
         sip_df, mip_df, demand_df=demand_df,
     )
@@ -116,27 +142,123 @@ def _render_allocation_body(result) -> None:
     mip_values = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series is not None else None
 
+    # ── Intraday 48-SP day-ahead forecast (lead content) ──────────────
     st.markdown("---")
-    st.subheader("1. Forecast Inputs")
+    st.subheader("1. Intraday Day-Ahead Forecast")
+    st.caption(
+        "True settlement-period-level forecast for the next 48 SPs using the trained model. "
+        "Each point is one 30-minute period. Select the lookback window to use "
+        "as the price input to the allocation optimiser below."
+    )
 
-    sip_fc_48 = _build_48sp_forecast(trained_sip, sip_values, mip_values, demand_values, "SIP")
-    mip_fc_48 = _build_48sp_forecast(trained_mip, sip_values, mip_values, demand_values, "MIP")
+    sip_intraday: dict = {}
+    mip_intraday: dict = {}
 
-    # Cache so the multi-profile section can access them without re-computing
+    if isinstance(trained_sip, TrainedNPModels):
+        _sip_scalar = _build_48sp_forecast_legacy(
+            trained_sip, sip_values, mip_values, demand_values, "SIP"
+        )
+        if _sip_scalar is not None:
+            sip_intraday = {"NP": _sip_scalar}
+    elif trained_sip is not None:
+        _sip_exog = _build_exog_dict_for_forecast(trained_sip, sip_series)
+        sip_intraday = forecast_intraday_48sp(trained_sip, sip_values, mip_values, demand_values, exog_dict=_sip_exog)
+
+    if isinstance(trained_mip, TrainedNPModels):
+        _mip_scalar = _build_48sp_forecast_legacy(
+            trained_mip, sip_values, mip_values, demand_values, "MIP"
+        )
+        if _mip_scalar is not None:
+            mip_intraday = {"NP": _mip_scalar}
+    elif trained_mip is not None:
+        _mip_exog = _build_exog_dict_for_forecast(trained_mip, mip_series)
+        mip_intraday = forecast_intraday_48sp(trained_mip, sip_values, mip_values, demand_values, exog_dict=_mip_exog)
+
+    available_lbs = sorted(set(list(sip_intraday.keys()) + list(mip_intraday.keys())))
+    if not available_lbs:
+        st.error("Could not generate any intraday forecasts. Train models first.")
+        return
+
+    selected_lb = st.radio(
+        "Lookback window for optimiser",
+        available_lbs,
+        horizontal=True,
+        key="_alloc_intraday_lb",
+    )
+
+    sp_labels_full = SP_LABELS[:NUM_SETTLEMENT_PERIODS]
+    hist_sip = sip_values[-48:] if len(sip_values) >= 48 else sip_values
+    hist_mip = mip_values[-48:] if len(mip_values) >= 48 else mip_values
+    hist_labels = [f"T-{len(hist_sip)-i}" for i in range(len(hist_sip))]
+
+    fig_id = go.Figure()
+    fig_id.add_trace(go.Scatter(
+        x=hist_labels, y=hist_sip.tolist(),
+        mode="lines", name="SIP (last 48 actuals)",
+        line=dict(color=COLOUR_MUTED, width=1, dash="dot"),
+    ))
+    fig_id.add_trace(go.Scatter(
+        x=hist_labels, y=hist_mip.tolist(),
+        mode="lines", name="MIP (last 48 actuals)",
+        line=dict(color=COLOUR_MUTED, width=1, dash="dash"),
+    ))
+    if selected_lb in sip_intraday:
+        fig_id.add_trace(go.Bar(
+            x=sp_labels_full, y=sip_intraday[selected_lb].tolist(),
+            name=f"SIP Forecast ({selected_lb})",
+            marker_color=COLOUR_PRIMARY, opacity=0.8,
+        ))
+    if selected_lb in mip_intraday:
+        fig_id.add_trace(go.Scatter(
+            x=sp_labels_full, y=mip_intraday[selected_lb].tolist(),
+            mode="lines+markers", name=f"MIP Forecast ({selected_lb})",
+            line=dict(color=COLOUR_WARNING, width=2),
+            marker=dict(size=4),
+        ))
+    fig_id.update_layout(
+        template=PLOTLY_TEMPLATE,
+        title=f"Intraday Day-Ahead Forecast — {selected_lb} lookback",
+        xaxis_title="Settlement Period",
+        yaxis_title="£/MWh",
+        height=460,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_id, use_container_width=True)
+
+    if st.toggle("Compare all lookbacks", key="_alloc_show_all_lbs", value=False):
+        fig_all = go.Figure()
+        for lb, arr in sip_intraday.items():
+            fig_all.add_trace(go.Scatter(
+                x=sp_labels_full, y=arr.tolist(), mode="lines", name=f"SIP {lb}",
+            ))
+        fig_all.update_layout(
+            template=PLOTLY_TEMPLATE, title="SIP Forecast — All Lookbacks",
+            xaxis_title="Settlement Period", yaxis_title="£/MWh", height=360,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_all, use_container_width=True)
+
+    # Resolve final 48-SP arrays for the optimiser
+    sip_fc_48 = sip_intraday.get(selected_lb)
+    mip_fc_48 = mip_intraday.get(selected_lb)
+
+    if sip_fc_48 is None or np.all(np.isnan(sip_fc_48)):
+        sip_fc_48 = sip_values[-48:].copy()
+        st.caption("No SIP intraday forecast — using last observed day as fallback.")
+    else:
+        sip_fc_48 = np.nan_to_num(sip_fc_48, nan=float(np.nanmean(sip_fc_48)))
+
+    if mip_fc_48 is None or np.all(np.isnan(mip_fc_48)):
+        mip_fc_48 = mip_values[-48:].copy()
+        st.caption("No MIP intraday forecast — using last observed day as fallback.")
+    else:
+        mip_fc_48 = np.nan_to_num(mip_fc_48, nan=float(np.nanmean(mip_fc_48)))
+
+    # Cache for multi-profile section
     st.session_state["_alloc_sip_fc_48"] = sip_fc_48
     st.session_state["_alloc_mip_fc_48"] = mip_fc_48
 
-    if sip_fc_48 is None and mip_fc_48 is None:
-        st.error("Could not generate any forward forecasts. Train models first.")
-        return
-
-    if sip_fc_48 is None:
-        sip_fc_48 = sip_values[-48:].copy()
-        st.caption("No SIP model — using last observed day as SIP forecast.")
-    if mip_fc_48 is None:
-        mip_fc_48 = mip_values[-48:].copy()
-        st.caption("No MIP model — using last observed day as MIP forecast.")
-
+    # Secondary: spread chart
     _render_forecast_summary(sip_fc_48, mip_fc_48, trained_sip, trained_mip)
 
     # ── Risk tolerance slider ─────────────────────────────────────────
@@ -587,13 +709,13 @@ def _ensure_model(target: str, label: str, engine: str = "XGBoost"):
         return trained
 
 
-def _build_48sp_forecast(
+def _build_48sp_forecast_legacy(
     trained, sip_values, mip_values, demand_values, target_label: str,
 ) -> np.ndarray | None:
     """
-    Build a 48-SP (one day) forecast from a trained XGBoost or NeuralProphet model.
-    Uses the day-1 forward forecast and repeats it across all 48 SPs.
-    Falls back to last observed day if model is not available.
+    Legacy scalar×shape fallback — used only for NeuralProphet models.
+    Takes the day-1 forward forecast scalar and scales the last-day intraday shape.
+    XGBoost models use forecast_intraday_48sp() instead for true per-SP predictions.
     """
     if trained is None:
         return None

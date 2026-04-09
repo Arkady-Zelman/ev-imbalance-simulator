@@ -53,6 +53,7 @@ def _build_features(
     horizon: int,
     mip_values: Optional[np.ndarray] = None,
     aux_values: Optional[np.ndarray] = None,
+    exog_dict: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[np.ndarray]:
     """
     Build a feature vector for the observation at *idx* predicting *horizon*
@@ -159,6 +160,14 @@ def _build_features(
             feats.append(np.nan)
     else:
         feats += [np.nan, np.nan, np.nan, np.nan]
+
+    # Additional exogenous series — 3 features each: 1d lag, 7d lag, 24h rolling mean
+    if exog_dict:
+        for _arr in exog_dict.values():
+            feats.append(_arr[idx - 48]  if idx >= 48  else np.nan)
+            feats.append(_arr[idx - 336] if idx >= 336 else np.nan)
+            _w = _arr[max(0, idx - 48):idx]
+            feats.append(float(np.nanmean(_w)) if len(_w) > 0 else np.nan)
 
     return np.array(feats, dtype=np.float32)
 
