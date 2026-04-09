@@ -50,6 +50,14 @@ from src.models.xgb_trainer import (
     train_all_xgb_parallel,
     train_xgb_models,
 )
+from src.models.lstm_trainer import (
+    TrainedLSTMModels,
+    has_trained_lstm_models,
+    load_trained_lstm_models,
+    save_trained_lstm_models,
+    train_all_lstm_parallel,
+    train_lstm_models,
+)
 from src.models.dispatch_engine import process_generation_outturn
 from src.session_keys import DEMAND_DF, EXOG_SERIES, GEN_DF, MIP_DF, SELECTED_LOOKBACK, SIP_DF
 
@@ -223,7 +231,7 @@ def _render_rolling_backtest_body() -> None:
             "Total Generation": "total_generation",
         }[target_label]
     with col2:
-        method_options = ["TOD Mean", "EWMA", "XGBoost", "NeuralProphet"]
+        method_options = ["TOD Mean", "EWMA", "XGBoost", "LSTM", "Hybrid LSTM+XGBoost", "NeuralProphet"]
         method = st.radio(
             "Forecast method",
             method_options,
@@ -234,6 +242,8 @@ def _render_rolling_backtest_body() -> None:
             "TOD Mean": "tod_mean",
             "EWMA": "ewma",
             "XGBoost": "xgb",
+            "LSTM": "lstm",
+            "Hybrid LSTM+XGBoost": "hybrid",
             "NeuralProphet": "neuralprophet",
         }[method]
     with col3:
@@ -276,12 +286,12 @@ def _render_rolling_backtest_body() -> None:
     if gen_breakdown is not None:
         gen_series_rb = pd.Series(gen_breakdown.total_mw, index=gen_breakdown.index)
 
-    # ── Exogenous Variables (XGBoost only) ───────────────────────────
+    # ── Exogenous Variables (XGBoost / LSTM / Hybrid) ────────────────
     exog_series_for_training: dict | None = None
-    if method_key == "xgb":
+    if method_key in ("xgb", "lstm", "hybrid"):
         with st.expander("Exogenous Variables", expanded=False):
             st.caption(
-                "Additional signals passed to XGBoost as features. "
+                "Additional signals passed to the forecast model as features/channels. "
                 "All sources are free and require no API key."
             )
             st.markdown("**Already available (no extra fetch)**")
@@ -444,6 +454,163 @@ def _render_rolling_backtest_body() -> None:
             st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
             st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
             st.session_state["_rb_last_key"] = rb_key_prefix
+
+    elif method_key in ("lstm", "hybrid"):
+        # ── LSTM (and Hybrid uses same training UI) ───────────────────────────
+        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
+        ss_key_lstm = f"_lstm_trained_models_{target_key}"
+        ss_key_xgb  = f"_xgb_trained_models_{target_key}"
+
+        st.markdown("---")
+        st.subheader(f"LSTM {target_desc} Model Training")
+        st.caption(
+            f"Train an **LSTM** {target_desc} model using raw time-series sequences. "
+            "Architecture: 2 × LSTM layers + Linear output (PyTorch). "
+            "Huber loss, Adam optimiser, early stopping."
+        )
+
+        col_ldp, col_lqk, col_lsh = st.columns(3)
+        with col_ldp:
+            lstm_deep_btn = st.button(
+                f"🏋️ In-Depth Search ({target_desc})",
+                use_container_width=True,
+                type="primary",
+                key="rb_lstm_deep",
+                help="15 combos × 20 search epochs + 50 final epochs. Best accuracy.",
+            )
+        with col_lqk:
+            lstm_quick_btn = st.button(
+                f"⚡ Quick Search ({target_desc})",
+                use_container_width=True,
+                key="rb_lstm_quick",
+                help="5 combos × 20 epochs. Fast point-in-time tuning.",
+            )
+        with col_lsh:
+            lstm_show_btn = st.button(
+                f"📊 Show {target_desc} Results",
+                use_container_width=True,
+                key="rb_lstm_show",
+                help=f"Load results from the last trained {target_desc} LSTM model.",
+            )
+
+        lstm_search_mode = None
+        if lstm_deep_btn:
+            lstm_search_mode = "grid"
+        elif lstm_quick_btn:
+            lstm_search_mode = "random"
+
+        if lstm_search_mode is not None:
+            mode_label = "In-depth" if lstm_search_mode == "grid" else "Quick"
+            with st.spinner("Aligning SIP, MIP and Demand series…"):
+                sip_series, mip_series, demand_series, _ = build_aligned_series(
+                    sip_df, mip_df, demand_df=demand_df,
+                )
+            n_days = len(sip_series) // 48
+            if n_days < 45:
+                st.error(
+                    f"Need at least 45 days of aligned data. "
+                    f"Currently have {n_days} days. Increase the date range."
+                )
+            else:
+                progress_bar = st.progress(0.0)
+                status_text  = st.empty()
+
+                def _lstm_progress(frac: float, msg: str) -> None:
+                    progress_bar.progress(min(frac, 1.0))
+                    status_text.caption(msg)
+
+                try:
+                    trained_lstm = train_lstm_models(
+                        sip_series, mip_series,
+                        demand_series=demand_series,
+                        target=target_key,
+                        progress_callback=_lstm_progress,
+                        param_search_mode=lstm_search_mode,
+                        gen_series=gen_series_rb,
+                        selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
+                        exog_series=exog_series_for_training or None,
+                    )
+                except Exception as exc:
+                    st.error(f"LSTM training failed: {exc}")
+                    logger.exception("LSTM training error")
+                    trained_lstm = None
+
+                if trained_lstm is not None:
+                    progress_bar.empty()
+                    status_text.empty()
+                    save_trained_lstm_models(trained_lstm, target=target_key)
+                    st.session_state[ss_key_lstm] = trained_lstm
+                    _display_lstm_training_summary(trained_lstm)
+
+                    rb_key_prefix = f"_rb_{target_key}_{method_key}"
+                    st.session_state[f"{rb_key_prefix}_errors"]    = trained_lstm.backtest_errors
+                    st.session_state[f"{rb_key_prefix}_crossovers"] = trained_lstm.backtest_crossovers
+                    st.session_state["_rb_last_key"] = rb_key_prefix
+                    st.success(
+                        f"{mode_label} LSTM {target_desc} training complete — "
+                        f"{len(trained_lstm.backtest_errors)} backtest configurations evaluated. "
+                        f"Model saved to disk."
+                    )
+
+        if lstm_show_btn:
+            trained_lstm = st.session_state.get(ss_key_lstm)
+            if trained_lstm is None:
+                trained_lstm = load_trained_lstm_models(target=target_key)
+                if trained_lstm is not None:
+                    st.session_state[ss_key_lstm] = trained_lstm
+
+            if trained_lstm is None:
+                st.info(
+                    f"No trained {target_desc} LSTM model found. "
+                    f"Press one of the training buttons first."
+                )
+            else:
+                import datetime as dt
+                ts = dt.datetime.fromtimestamp(trained_lstm.training_timestamp)
+                st.caption(f"Loaded {target_desc} LSTM model trained at **{ts:%Y-%m-%d %H:%M}**")
+                _display_lstm_training_summary(trained_lstm)
+
+                rb_key_prefix = f"_rb_{target_key}_{method_key}"
+                st.session_state[f"{rb_key_prefix}_errors"]    = trained_lstm.backtest_errors
+                st.session_state[f"{rb_key_prefix}_crossovers"] = trained_lstm.backtest_crossovers
+                st.session_state["_rb_last_key"] = rb_key_prefix
+
+        # Hybrid — additionally show XGBoost component status
+        if method_key == "hybrid":
+            st.markdown("---")
+            st.subheader(f"Hybrid Ensemble — {target_desc}")
+            st.caption(
+                "The Hybrid forecast combines LSTM + XGBoost predictions using inverse-MAE "
+                "weighting: the model with lower validation error gets higher weight."
+            )
+            trained_lstm_h = st.session_state.get(ss_key_lstm) or load_trained_lstm_models(target_key)
+            trained_xgb_h  = st.session_state.get(ss_key_xgb)  or load_trained_models(target=target_key)
+            c_l, c_x = st.columns(2)
+            with c_l:
+                if trained_lstm_h is not None:
+                    import datetime as dt
+                    ts_l = dt.datetime.fromtimestamp(trained_lstm_h.training_timestamp)
+                    st.success(f"LSTM trained at {ts_l:%Y-%m-%d %H:%M}")
+                else:
+                    st.warning("LSTM model not found — train above first.")
+            with c_x:
+                if trained_xgb_h is not None:
+                    import datetime as dt
+                    ts_x = dt.datetime.fromtimestamp(trained_xgb_h.training_timestamp)
+                    st.success(f"XGBoost trained at {ts_x:%Y-%m-%d %H:%M}")
+                else:
+                    st.warning("XGBoost model not found — switch to XGBoost tab and train.")
+
+            if trained_lstm_h is not None and trained_xgb_h is not None:
+                from src.models.hybrid_forecaster import _best_val_mae
+                w_lstm_raw = _best_val_mae(trained_lstm_h)
+                w_xgb_raw  = _best_val_mae(trained_xgb_h)
+                if w_lstm_raw and w_xgb_raw:
+                    total = (1 / w_lstm_raw) + (1 / w_xgb_raw)
+                    pct_l = round(100 * (1 / w_lstm_raw) / total)
+                    pct_x = 100 - pct_l
+                    st.metric("LSTM weight", f"{pct_l}%", help="Based on inverse validation MAE")
+                    st.metric("XGBoost weight", f"{pct_x}%")
 
     elif method_key == "neuralprophet":
         # ── NeuralProphet: full training workflow (mirrors XGBoost) ──────────
@@ -775,7 +942,90 @@ def _render_rolling_backtest_body() -> None:
                     f"trained: {', '.join(_target_labels_all.get(t, t) for t in ok_np)}"
                 )
 
-    # ── Model Diagnostics (XGBoost only) ─────────────────────────────
+    # LSTM — all 4 targets
+    st.caption(
+        "**LSTM** — Trains SIP · MIP · Demand · Generation in parallel. "
+        "PyTorch Huber-loss LSTM; CUDA GPU used when available."
+    )
+    col_ll1, col_ll2 = st.columns(2)
+    with col_ll1:
+        lstm_para_deep = st.button(
+            "🏋️ All 4 LSTM — In-Depth",
+            use_container_width=True, type="primary", key="rb_lstm_para_deep",
+            help="15-combo search per model. Best accuracy; takes several minutes.",
+        )
+    with col_ll2:
+        lstm_para_quick = st.button(
+            "⚡ All 4 LSTM — Quick",
+            use_container_width=True, key="rb_lstm_para_quick",
+            help="5-combo search per model. Fast point-in-time tuning.",
+        )
+
+    lstm_para_mode: Optional[str] = "grid" if lstm_para_deep else ("random" if lstm_para_quick else None)
+
+    if lstm_para_mode is not None:
+        with st.spinner("Aligning series for LSTM parallel training…"):
+            sip_series_ll, mip_series_ll, demand_series_ll, _ = build_aligned_series(
+                sip_df, mip_df, demand_df=demand_df,
+            )
+        n_days_ll = len(sip_series_ll) // 48
+        if n_days_ll < 45:
+            st.error(
+                f"Need at least 45 days of aligned data. "
+                f"Currently have {n_days_ll} days. Increase the date range."
+            )
+        else:
+            lstm_para_targets = ["sip", "mip"]
+            if has_demand:
+                lstm_para_targets.append("demand")
+            if has_gen:
+                lstm_para_targets.append("total_generation")
+
+            lstm_para_bars = {t: st.progress(0.0, text=_target_labels_all.get(t, t))
+                              for t in lstm_para_targets}
+
+            _st_ctx_ll = get_script_run_ctx()
+
+            def _make_lstm_para_cb(tgt: str):
+                def _cb(frac: float, msg: str) -> None:
+                    add_script_run_ctx(threading.current_thread(), _st_ctx_ll)
+                    lstm_para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                return _cb
+
+            lstm_para_cbs = {t: _make_lstm_para_cb(t) for t in lstm_para_targets}
+
+            with st.spinner(f"Training {len(lstm_para_targets)} LSTM models in parallel…"):
+                lstm_para_result = train_all_lstm_parallel(
+                    sip_series=sip_series_ll,
+                    mip_series=mip_series_ll,
+                    demand_series=demand_series_ll if has_demand else None,
+                    gen_series=gen_series_rb,
+                    targets=lstm_para_targets,
+                    param_search_mode=lstm_para_mode,
+                    selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
+                    progress_callbacks=lstm_para_cbs,
+                    exog_series=st.session_state.get(EXOG_SERIES) or None,
+                )
+
+            for t, trained_ll in lstm_para_result.models.items():
+                st.session_state[f"_lstm_trained_models_{t}"] = trained_ll
+            for t, err in lstm_para_result.errors.items():
+                st.error(f"{_target_labels_all.get(t, t)} LSTM training failed: {err}")
+
+            ok_ll = list(lstm_para_result.models.keys())
+            if ok_ll:
+                st.success(
+                    f"LSTM parallel training complete in {lstm_para_result.elapsed_seconds:.0f}s — "
+                    f"trained: {', '.join(_target_labels_all.get(t, t) for t in ok_ll)}"
+                )
+
+    # ── Model Diagnostics (XGBoost / LSTM) ───────────────────────────
+    if method_key in ("xgb", "lstm", "hybrid"):
+        _diag_key = (
+            f"_xgb_trained_models_{target_key}" if method_key == "xgb"
+            else f"_lstm_trained_models_{target_key}"
+        )
+        _trained_diag = st.session_state.get(_diag_key)
     if method_key == "xgb":
         _trained_diag = st.session_state.get(f"_xgb_trained_models_{target_key}")
         if _trained_diag is not None and getattr(_trained_diag, "grid_search_history", None):
@@ -1274,6 +1524,28 @@ def _display_np_training_summary(trained) -> None:
         })
     if summary_rows:
         with st.expander("NeuralProphet Grid Search — Best Params per Lookback"):
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+
+def _display_lstm_training_summary(trained) -> None:
+    """Show a compact summary of LSTM best hyperparams from grid search."""
+    summary_rows = []
+    for lb_label in trained.best_params:
+        for h_sps, params in trained.best_params[lb_label].items():
+            h_days = h_sps // 48
+            score = trained.best_scores.get(lb_label, {}).get(h_sps, float("nan"))
+            summary_rows.append({
+                "Lookback":    lb_label,
+                "Horizon":     f"{h_days}d",
+                "hidden_size": params.get("hidden_size"),
+                "num_layers":  params.get("num_layers"),
+                "seq_len":     params.get("seq_len"),
+                "dropout":     params.get("dropout"),
+                "lr":          params.get("lr"),
+                "Val Huber Loss": f"{score:.4f}" if score not in (float("inf"), float("nan")) else "N/A",
+            })
+    if summary_rows:
+        with st.expander("Grid Search Results — Best LSTM Params per (Lookback, Horizon)"):
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
 

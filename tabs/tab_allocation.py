@@ -44,6 +44,13 @@ from src.models.xgb_trainer import (
     load_trained_models,
 )
 from src.session_keys import DEMAND_DF, EXOG_SERIES, MIP_DF, MULTI_PROFILE_RESULTS, RESULT, SIP_DF
+from src.models.lstm_trainer import (
+    TrainedLSTMModels,
+    forecast_intraday_48sp as lstm_forecast_intraday_48sp,
+    has_trained_lstm_models,
+    load_trained_lstm_models,
+)
+from src.models import hybrid_forecaster as _hybrid
 
 
 def _build_exog_dict_for_forecast(
@@ -52,22 +59,21 @@ def _build_exog_dict_for_forecast(
 ) -> "Optional[Dict[str, np.ndarray]]":
     """
     Reconstruct the exog_dict for inference from session-state exog_series.
-    Aligns each stored pd.Series to the target series index.
-    Returns None if no exog series are stored or model has no exog_keys.
+    Works for both TrainedXGBModels and TrainedLSTMModels.
     """
     from src.models.xgb_trainer import TrainedXGBModels, _align_to_target
-    if not isinstance(trained, TrainedXGBModels):
-        return None
+    from src.models.lstm_trainer import _align_to_target as _lstm_align
     exog_keys = getattr(trained, "exog_keys", [])
     if not exog_keys:
         return None
     stored: dict = st.session_state.get(EXOG_SERIES) or {}
     if not stored:
         return None
+    align_fn = _align_to_target if isinstance(trained, TrainedXGBModels) else _lstm_align
     result_dict: dict = {}
     for k in exog_keys:
         if k in stored:
-            result_dict[k] = _align_to_target(target_series, stored[k])
+            result_dict[k] = align_fn(target_series, stored[k])
     return result_dict if result_dict else None
 
 
@@ -110,15 +116,16 @@ def _render_allocation_body(result) -> None:
     st.markdown("---")
     st.subheader("0. Forecast Model Selection")
     col_s, col_m = st.columns(2)
+    _engine_options = ["XGBoost", "LSTM", "Hybrid LSTM+XGBoost", "NeuralProphet"]
     with col_s:
         sip_engine = st.selectbox(
-            "SIP forecast engine", ["XGBoost", "NeuralProphet"],
+            "SIP forecast engine", _engine_options,
             key="_alloc_sip_engine",
             help="Which trained model to use for the SIP (balancing price) forecast.",
         )
     with col_m:
         mip_engine = st.selectbox(
-            "MIP forecast engine", ["XGBoost", "NeuralProphet"],
+            "MIP forecast engine", _engine_options,
             key="_alloc_mip_engine",
             help="Which trained model to use for the MIP (wholesale price) forecast.",
         )
@@ -127,10 +134,17 @@ def _render_allocation_body(result) -> None:
     trained_sip = _ensure_model("sip", "Price (SIP)", sip_engine)
     trained_mip = _ensure_model("mip", "Wholesale (MIP)", mip_engine)
 
-    if trained_sip is None and trained_mip is None:
+    def _model_available(m) -> bool:
+        if m is None:
+            return False
+        if isinstance(m, tuple):
+            return any(x is not None for x in m)
+        return True
+
+    if not _model_available(trained_sip) and not _model_available(trained_mip):
         st.error(
             "At least one trained model (Price or Wholesale) is required. "
-            "Go to the **Rolling Backtest** tab and train an XGBoost or NeuralProphet model first."
+            "Go to the **Rolling Backtest** tab and train an XGBoost, LSTM, or NeuralProphet model first."
         )
         return
 
@@ -160,6 +174,19 @@ def _render_allocation_body(result) -> None:
         )
         if _sip_scalar is not None:
             sip_intraday = {"NP": _sip_scalar}
+    elif isinstance(trained_sip, tuple):
+        # Hybrid LSTM+XGBoost
+        xgb_m, lstm_m = trained_sip
+        xgb_fc_sip  = forecast_intraday_48sp(xgb_m,  sip_values, mip_values, demand_values,
+                                              exog_dict=_build_exog_dict_for_forecast(xgb_m, sip_series)) if xgb_m else {}
+        lstm_fc_sip = lstm_forecast_intraday_48sp(lstm_m, sip_values, mip_values, demand_values,
+                                                   exog_dict=_build_exog_dict_for_forecast(lstm_m, sip_series)) if lstm_m else {}
+        hybrid_sip  = _hybrid.combine_intraday(xgb_fc_sip, lstm_fc_sip, xgb_trained=xgb_m, lstm_trained=lstm_m)
+        sip_intraday = hybrid_sip.combined
+        st.caption(f"SIP hybrid weights — LSTM: {hybrid_sip.lstm_weight:.0%} · XGBoost: {hybrid_sip.xgb_weight:.0%}")
+    elif isinstance(trained_sip, TrainedLSTMModels):
+        _sip_exog = _build_exog_dict_for_forecast(trained_sip, sip_series)
+        sip_intraday = lstm_forecast_intraday_48sp(trained_sip, sip_values, mip_values, demand_values, exog_dict=_sip_exog)
     elif trained_sip is not None:
         _sip_exog = _build_exog_dict_for_forecast(trained_sip, sip_series)
         sip_intraday = forecast_intraday_48sp(trained_sip, sip_values, mip_values, demand_values, exog_dict=_sip_exog)
@@ -170,6 +197,19 @@ def _render_allocation_body(result) -> None:
         )
         if _mip_scalar is not None:
             mip_intraday = {"NP": _mip_scalar}
+    elif isinstance(trained_mip, tuple):
+        # Hybrid LSTM+XGBoost
+        xgb_m, lstm_m = trained_mip
+        xgb_fc_mip  = forecast_intraday_48sp(xgb_m,  sip_values, mip_values, demand_values,
+                                              exog_dict=_build_exog_dict_for_forecast(xgb_m, mip_series)) if xgb_m else {}
+        lstm_fc_mip = lstm_forecast_intraday_48sp(lstm_m, sip_values, mip_values, demand_values,
+                                                   exog_dict=_build_exog_dict_for_forecast(lstm_m, mip_series)) if lstm_m else {}
+        hybrid_mip  = _hybrid.combine_intraday(xgb_fc_mip, lstm_fc_mip, xgb_trained=xgb_m, lstm_trained=lstm_m)
+        mip_intraday = hybrid_mip.combined
+        st.caption(f"MIP hybrid weights — LSTM: {hybrid_mip.lstm_weight:.0%} · XGBoost: {hybrid_mip.xgb_weight:.0%}")
+    elif isinstance(trained_mip, TrainedLSTMModels):
+        _mip_exog = _build_exog_dict_for_forecast(trained_mip, mip_series)
+        mip_intraday = lstm_forecast_intraday_48sp(trained_mip, sip_values, mip_values, demand_values, exog_dict=_mip_exog)
     elif trained_mip is not None:
         _mip_exog = _build_exog_dict_for_forecast(trained_mip, mip_series)
         mip_intraday = forecast_intraday_48sp(trained_mip, sip_values, mip_values, demand_values, exog_dict=_mip_exog)
@@ -678,7 +718,7 @@ def _render_allocation_body(result) -> None:
 
 
 def _ensure_model(target: str, label: str, engine: str = "XGBoost"):
-    """Load model from session or disk for the given engine (XGBoost or NeuralProphet)."""
+    """Load model from session or disk for the given engine."""
     if engine == "NeuralProphet":
         ss_key = f"_np_trained_models_{target}"
         trained = st.session_state.get(ss_key)
@@ -693,7 +733,42 @@ def _ensure_model(target: str, label: str, engine: str = "XGBoost"):
             st.caption(f"{label} model: NeuralProphet — not yet trained")
             trained = None
         return trained
-    else:
+    elif engine == "LSTM":
+        ss_key = f"_lstm_trained_models_{target}"
+        trained = st.session_state.get(ss_key)
+        if trained is None:
+            trained = load_trained_lstm_models(target=target)
+            if trained is not None:
+                st.session_state[ss_key] = trained
+        if trained is not None and trained.final_state_dicts:
+            ts = dt.datetime.fromtimestamp(trained.training_timestamp)
+            st.caption(f"{label} model: LSTM — trained **{ts:%Y-%m-%d %H:%M}**")
+        else:
+            st.caption(f"{label} model: LSTM — not yet trained")
+            trained = None
+        return trained
+    elif engine == "Hybrid LSTM+XGBoost":
+        # Return a tuple (xgb, lstm); caller handles hybrid dispatch
+        xgb_ss  = f"_xgb_trained_models_{target}"
+        lstm_ss = f"_lstm_trained_models_{target}"
+        xgb_m  = st.session_state.get(xgb_ss)  or load_trained_models(target=target)
+        lstm_m = st.session_state.get(lstm_ss) or load_trained_lstm_models(target=target)
+        if xgb_m is not None:
+            st.session_state[xgb_ss] = xgb_m
+        if lstm_m is not None:
+            st.session_state[lstm_ss] = lstm_m
+        if xgb_m is not None and lstm_m is not None:
+            ts_x = dt.datetime.fromtimestamp(xgb_m.training_timestamp)
+            ts_l = dt.datetime.fromtimestamp(lstm_m.training_timestamp)
+            st.caption(f"{label} model: Hybrid (XGBoost {ts_x:%H:%M} · LSTM {ts_l:%H:%M})")
+        elif xgb_m is not None:
+            st.caption(f"{label} model: Hybrid fallback → XGBoost only (no LSTM found)")
+        elif lstm_m is not None:
+            st.caption(f"{label} model: Hybrid fallback → LSTM only (no XGBoost found)")
+        else:
+            st.caption(f"{label} model: Hybrid — neither model found")
+        return (xgb_m, lstm_m)  # tuple sentinel for hybrid
+    else:  # XGBoost
         ss_key = f"_xgb_trained_models_{target}"
         trained = st.session_state.get(ss_key)
         if trained is None:
