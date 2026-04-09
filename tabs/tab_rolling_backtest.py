@@ -52,6 +52,7 @@ from src.models.xgb_trainer import (
 )
 from src.models.lstm_trainer import (
     TrainedLSTMModels,
+    forecast_forward as lstm_forecast_forward,
     has_trained_lstm_models,
     load_trained_lstm_models,
     save_trained_lstm_models,
@@ -211,68 +212,6 @@ def _render_rolling_backtest_body() -> None:
 
     # ── Configuration ─────────────────────────────────────────────────
     st.subheader("Configuration")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        target_options = ["Price (SIP)", "Wholesale (MIP)"]
-        if has_demand:
-            target_options.append("Demand")
-        if has_gen:
-            target_options.append("Total Generation")
-        target_label = st.radio(
-            "Forecast target",
-            target_options,
-            horizontal=True,
-            key="rb_target",
-        )
-        target_key = {
-            "Price (SIP)": "sip",
-            "Wholesale (MIP)": "mip",
-            "Demand": "demand",
-            "Total Generation": "total_generation",
-        }[target_label]
-    with col2:
-        method_options = ["TOD Mean", "EWMA", "XGBoost", "LSTM", "Hybrid LSTM+XGBoost", "NeuralProphet"]
-        method = st.radio(
-            "Forecast method",
-            method_options,
-            horizontal=True,
-            key="rb_method",
-        )
-        method_key = {
-            "TOD Mean": "tod_mean",
-            "EWMA": "ewma",
-            "XGBoost": "xgb",
-            "LSTM": "lstm",
-            "Hybrid LSTM+XGBoost": "hybrid",
-            "NeuralProphet": "neuralprophet",
-        }[method]
-    with col3:
-        ewma_alpha = st.slider(
-            "EWMA α", 0.01, 0.30, 0.05, 0.01,
-            key="rb_ewma_alpha",
-            help="Only used when EWMA is selected.",
-        )
-    with col4:
-        lb_options = ["All (1d · 5d · 15d · 30d)"] + list(ROLLING_LOOKBACKS.keys())
-        lb_sel = st.selectbox(
-            "Lookback Window",
-            lb_options,
-            index=0,
-            key="rb_lookback_select",
-            help=(
-                "Pick a single lookback to train faster and focus model accuracy. "
-                "'All' trains every window (original behaviour)."
-            ),
-        )
-        selected_lookback: Optional[str] = None if lb_sel.startswith("All") else lb_sel
-        st.session_state[SELECTED_LOOKBACK] = selected_lookback
-
-    if target_key == "demand" and not has_demand:
-        st.warning("No demand data available. Run a simulation with demand data first.")
-        return
-    if target_key == "total_generation" and not has_gen:
-        st.warning("No generation data available. Run a simulation first.")
-        return
 
     _TARGET_DESC = {
         "sip": "Price (SIP)",
@@ -281,6 +220,74 @@ def _render_rolling_backtest_body() -> None:
         "total_generation": "Total Generation",
     }
 
+    # Forecast targets — checkboxes
+    st.caption("**Forecast targets** — select one or more")
+    _target_opts = [("Price (SIP)", "sip"), ("Wholesale (MIP)", "mip")]
+    if has_demand:
+        _target_opts.append(("Demand", "demand"))
+    if has_gen:
+        _target_opts.append(("Total Generation", "total_generation"))
+    _tc = st.columns(max(len(_target_opts), 2))
+    selected_targets = [
+        key for (lbl, key), col in zip(_target_opts, _tc)
+        if col.checkbox(lbl, value=(key == "sip"), key=f"rb_tgt_{key}")
+    ]
+    if not selected_targets:
+        st.info("Select at least one forecast target above.")
+        return
+    # Filter targets whose data is unavailable
+    if "demand" in selected_targets and not has_demand:
+        st.warning("Demand data not available — removing Demand from selection.")
+        selected_targets = [t for t in selected_targets if t != "demand"]
+    if "total_generation" in selected_targets and not has_gen:
+        st.warning("Generation data not available — removing Total Generation from selection.")
+        selected_targets = [t for t in selected_targets if t != "total_generation"]
+    if not selected_targets:
+        st.warning("No valid targets available with current data.")
+        return
+    target_key = selected_targets[0]  # primary target for single-target operations
+
+    # Forecast method — dropdown
+    method_options = ["TOD Mean", "EWMA", "XGBoost", "LSTM", "Hybrid LSTM+XGBoost", "NeuralProphet"]
+    method_label = st.selectbox("Forecast method", method_options, index=2, key="rb_method")
+    method_key = {
+        "TOD Mean": "tod_mean",
+        "EWMA": "ewma",
+        "XGBoost": "xgb",
+        "LSTM": "lstm",
+        "Hybrid LSTM+XGBoost": "hybrid",
+        "NeuralProphet": "neuralprophet",
+    }[method_label]
+    selected_methods = [method_key]  # list wrapper for downstream compatibility
+
+    # EWMA alpha — shown only when EWMA is selected
+    if method_key == "ewma":
+        ewma_alpha = st.slider(
+            "EWMA α", 0.01, 0.30, 0.05, 0.01,
+            key="rb_ewma_alpha",
+            help="Exponential smoothing decay factor.",
+        )
+    else:
+        ewma_alpha = st.session_state.get("rb_ewma_alpha", 0.05)
+
+    # Lookback windows — checkboxes
+    st.caption("**Lookback windows** — select one or more")
+    _lb_keys = list(ROLLING_LOOKBACKS.keys())
+    _lbc = st.columns(len(_lb_keys))
+    selected_lookback_list = [
+        lb for lb, col in zip(_lb_keys, _lbc)
+        if col.checkbox(lb, value=True, key=f"rb_lb_{lb.replace(' ', '_')}")
+    ]
+    if not selected_lookback_list:
+        st.info("Select at least one lookback window above.")
+        return
+    selected_lookback: Optional[str] = (
+        selected_lookback_list[0] if len(selected_lookback_list) == 1 else None
+    )
+    st.session_state[SELECTED_LOOKBACK] = selected_lookback
+
+    target_desc = " · ".join(_TARGET_DESC[t] for t in selected_targets)
+
     # Build gen pd.Series aligned to breakdown index (if available)
     gen_series_rb: pd.Series | None = None
     if gen_breakdown is not None:
@@ -288,7 +295,7 @@ def _render_rolling_backtest_body() -> None:
 
     # ── Exogenous Variables (XGBoost / LSTM / Hybrid) ────────────────
     exog_series_for_training: dict | None = None
-    if method_key in ("xgb", "lstm", "hybrid"):
+    if any(m in ("xgb", "lstm", "hybrid") for m in selected_methods):
         with st.expander("Exogenous Variables", expanded=False):
             st.caption(
                 "Additional signals passed to the forecast model as features/channels. "
@@ -334,416 +341,356 @@ def _render_rolling_backtest_body() -> None:
         st.session_state[EXOG_SERIES] = exog_series_for_training
 
     # ── XGBoost: Train / Show Results workflow ────────────────────────
-    if method_key == "xgb":
-        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
-        ss_key = f"_xgb_trained_models_{target_key}"
-
+    if "xgb" in selected_methods:
         st.markdown("---")
-        st.subheader(f"XGBoost {target_desc} Model Training")
+        st.subheader(f"XGBoost Model Training — {target_desc}")
         st.caption(
-            f"Train a **{target_desc}** forecast model, then view results anytime. "
-            "Price and Demand models are stored separately and persist across sessions."
+            "Trains one model per selected target. Multiple targets run in parallel. "
+            "Models persist to disk across sessions."
         )
 
         col_deep, col_quick, col_show = st.columns(3)
         with col_deep:
             deep_btn = st.button(
-                f"🏋️ In-Depth Search ({target_desc})",
-                use_container_width=True,
-                type="primary",
-                key="rb_xgb_deep",
-                help="Systematic grid search over core hyperparameters (27 combos). "
-                     "Run periodically for best accuracy. Takes several minutes.",
+                "🏋️ In-Depth Search",
+                use_container_width=True, type="primary", key="rb_xgb_deep",
+                help="Systematic grid search over core hyperparameters (27 combos).",
             )
         with col_quick:
             quick_btn = st.button(
-                f"⚡ Quick Random Search ({target_desc})",
-                use_container_width=True,
-                key="rb_xgb_quick",
-                help="Random search across all hyperparameters (30 samples). "
-                     "Faster estimate for point-in-time tuning.",
+                "⚡ Quick Random Search",
+                use_container_width=True, key="rb_xgb_quick",
+                help="Random search across all hyperparameters (30 samples). Faster.",
             )
         with col_show:
             show_btn = st.button(
-                f"📊 Show {target_desc} Results",
-                use_container_width=True,
-                key="rb_xgb_show",
-                help=f"Load and display results from the last trained {target_desc} model.",
+                "📊 Show Results",
+                use_container_width=True, key="rb_xgb_show",
+                help="Load and display results from the last trained models.",
             )
 
-        search_mode = None
-        if deep_btn:
-            search_mode = "grid"
-        elif quick_btn:
-            search_mode = "random"
+        xgb_search_mode = "grid" if deep_btn else ("random" if quick_btn else None)
 
-        if search_mode is not None:
-            mode_label = "In-depth grid" if search_mode == "grid" else "Quick random"
-            with st.spinner("Aligning SIP, MIP and Demand series…"):
+        if xgb_search_mode is not None:
+            mode_label = "In-depth grid" if xgb_search_mode == "grid" else "Quick random"
+            with st.spinner("Aligning series…"):
                 sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
-            n_days = len(sip_series) // 48
-            if n_days < 45:
-                st.error(
-                    f"Need at least 45 days of aligned data. "
-                    f"Currently have {n_days} days. Increase the date range."
-                )
+            if len(sip_series) // 48 < 45:
+                st.error(f"Need at least 45 days of data. Currently {len(sip_series)//48} days.")
                 return
 
-            progress_bar = st.progress(0.0)
-            status_text = st.empty()
+            _st_ctx = get_script_run_ctx()
+            para_bars = {t: st.progress(0.0, text=_TARGET_DESC[t]) for t in selected_targets}
 
-            def _progress(frac: float, msg: str) -> None:
-                progress_bar.progress(min(frac, 1.0))
-                status_text.caption(msg)
+            def _make_xgb_cb(tgt):
+                def _cb(frac, msg):
+                    add_script_run_ctx(threading.current_thread(), _st_ctx)
+                    para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                return _cb
 
             try:
-                trained = train_xgb_models(
-                    sip_series, mip_series,
-                    demand_series=demand_series,
-                    target=target_key,
-                    progress_callback=_progress,
-                    param_search_mode=search_mode,
-                    gen_series=gen_series_rb,
-                    selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
-                    exog_series=exog_series_for_training or None,
-                )
+                with st.spinner(f"Training XGBoost — {target_desc}…"):
+                    xgb_para = train_all_xgb_parallel(
+                        sip_series=sip_series, mip_series=mip_series,
+                        demand_series=demand_series, gen_series=gen_series_rb,
+                        targets=selected_targets, param_search_mode=xgb_search_mode,
+                        selected_lookback=selected_lookback,
+                        progress_callbacks={t: _make_xgb_cb(t) for t in selected_targets},
+                        exog_series=exog_series_for_training or None,
+                    )
             except Exception as exc:
                 st.error(f"XGBoost training failed: {exc}")
                 logger.exception("XGBoost training error")
                 return
-            progress_bar.empty()
-            status_text.empty()
 
-            save_trained_models(trained, target=target_key)
-            st.session_state[ss_key] = trained
-
-            _display_training_summary(trained)
-
-            rb_key_prefix = f"_rb_{target_key}_{method_key}"
-            st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
-            st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
-            st.session_state["_rb_last_key"] = rb_key_prefix
-            st.success(
-                f"{mode_label} {target_desc} training complete — "
-                f"{len(trained.backtest_errors)} backtest configurations evaluated. "
-                f"Model saved to disk."
-            )
+            for t, trained in xgb_para.models.items():
+                save_trained_models(trained, target=t)
+                st.session_state[f"_xgb_trained_models_{t}"] = trained
+                rb_key_prefix = f"_rb_{t}_xgb"
+                st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
+                st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
+                st.session_state["_rb_last_key"] = rb_key_prefix
+            for t, err in xgb_para.errors.items():
+                st.error(f"{_TARGET_DESC[t]} XGBoost failed: {err}")
+            if xgb_para.models:
+                st.success(
+                    f"{mode_label} XGBoost training complete in {xgb_para.elapsed_seconds:.0f}s — "
+                    f"trained: {', '.join(_TARGET_DESC[t] for t in xgb_para.models)}"
+                )
+            _first_xgb = next(iter(xgb_para.models.values()), None)
+            if _first_xgb:
+                _display_training_summary(_first_xgb)
 
         if show_btn:
-            trained = st.session_state.get(ss_key)
-            if trained is None:
-                trained = load_trained_models(target=target_key)
-                if trained is not None:
-                    st.session_state[ss_key] = trained
-
-            if trained is None:
-                st.info(
-                    f"No trained {target_desc} model found. "
-                    f"Press one of the training buttons first."
-                )
-                return
-
             import datetime as dt
-            ts = dt.datetime.fromtimestamp(trained.training_timestamp)
-            st.caption(f"Loaded {target_desc} model trained at **{ts:%Y-%m-%d %H:%M}**")
-            _display_training_summary(trained)
+            for t in selected_targets:
+                trained = st.session_state.get(f"_xgb_trained_models_{t}") or load_trained_models(target=t)
+                if trained is None:
+                    st.info(f"No trained {_TARGET_DESC[t]} XGBoost model found.")
+                    continue
+                st.session_state[f"_xgb_trained_models_{t}"] = trained
+                ts = dt.datetime.fromtimestamp(trained.training_timestamp)
+                st.caption(f"{_TARGET_DESC[t]} XGBoost — trained **{ts:%Y-%m-%d %H:%M}**")
+                rb_key_prefix = f"_rb_{t}_xgb"
+                st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
+                st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
+                st.session_state["_rb_last_key"] = rb_key_prefix
+            _first_xgb = st.session_state.get(f"_xgb_trained_models_{target_key}")
+            if _first_xgb:
+                _display_training_summary(_first_xgb)
 
-            rb_key_prefix = f"_rb_{target_key}_{method_key}"
-            st.session_state[f"{rb_key_prefix}_errors"] = trained.backtest_errors
-            st.session_state[f"{rb_key_prefix}_crossovers"] = trained.backtest_crossovers
-            st.session_state["_rb_last_key"] = rb_key_prefix
-
-    elif method_key in ("lstm", "hybrid"):
+    if "lstm" in selected_methods or "hybrid" in selected_methods:
         # ── LSTM (and Hybrid uses same training UI) ───────────────────────────
-        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
-        ss_key_lstm = f"_lstm_trained_models_{target_key}"
-        ss_key_xgb  = f"_xgb_trained_models_{target_key}"
+        _lstm_method_key = "hybrid" if "hybrid" in selected_methods else "lstm"
 
         st.markdown("---")
-        st.subheader(f"LSTM {target_desc} Model Training")
+        st.subheader(f"LSTM Model Training — {target_desc}")
         st.caption(
-            f"Train an **LSTM** {target_desc} model using raw time-series sequences. "
-            "Architecture: 2 × LSTM layers + Linear output (PyTorch). "
-            "Huber loss, Adam optimiser, early stopping."
+            "Trains one LSTM model per selected target (PyTorch, Huber loss, early stopping). "
+            "Multiple targets run in parallel."
         )
 
         col_ldp, col_lqk, col_lsh = st.columns(3)
         with col_ldp:
             lstm_deep_btn = st.button(
-                f"🏋️ In-Depth Search ({target_desc})",
-                use_container_width=True,
-                type="primary",
-                key="rb_lstm_deep",
+                "🏋️ In-Depth Search",
+                use_container_width=True, type="primary", key="rb_lstm_deep",
                 help="15 combos × 20 search epochs + 50 final epochs. Best accuracy.",
             )
         with col_lqk:
             lstm_quick_btn = st.button(
-                f"⚡ Quick Search ({target_desc})",
-                use_container_width=True,
-                key="rb_lstm_quick",
+                "⚡ Quick Search",
+                use_container_width=True, key="rb_lstm_quick",
                 help="5 combos × 20 epochs. Fast point-in-time tuning.",
             )
         with col_lsh:
             lstm_show_btn = st.button(
-                f"📊 Show {target_desc} Results",
-                use_container_width=True,
-                key="rb_lstm_show",
-                help=f"Load results from the last trained {target_desc} LSTM model.",
+                "📊 Show Results",
+                use_container_width=True, key="rb_lstm_show",
+                help="Load results from the last trained LSTM models.",
             )
 
-        lstm_search_mode = None
-        if lstm_deep_btn:
-            lstm_search_mode = "grid"
-        elif lstm_quick_btn:
-            lstm_search_mode = "random"
+        lstm_search_mode = "grid" if lstm_deep_btn else ("random" if lstm_quick_btn else None)
 
         if lstm_search_mode is not None:
             mode_label = "In-depth" if lstm_search_mode == "grid" else "Quick"
-            with st.spinner("Aligning SIP, MIP and Demand series…"):
+            with st.spinner("Aligning series…"):
                 sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
-            n_days = len(sip_series) // 48
-            if n_days < 45:
-                st.error(
-                    f"Need at least 45 days of aligned data. "
-                    f"Currently have {n_days} days. Increase the date range."
-                )
+            if len(sip_series) // 48 < 45:
+                st.error(f"Need at least 45 days of data. Currently {len(sip_series)//48} days.")
             else:
-                progress_bar = st.progress(0.0)
-                status_text  = st.empty()
+                _st_ctx_l = get_script_run_ctx()
+                lstm_para_bars = {t: st.progress(0.0, text=_TARGET_DESC[t]) for t in selected_targets}
 
-                def _lstm_progress(frac: float, msg: str) -> None:
-                    progress_bar.progress(min(frac, 1.0))
-                    status_text.caption(msg)
+                def _make_lstm_cb(tgt):
+                    def _cb(frac, msg):
+                        add_script_run_ctx(threading.current_thread(), _st_ctx_l)
+                        lstm_para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                    return _cb
 
                 try:
-                    trained_lstm = train_lstm_models(
-                        sip_series, mip_series,
-                        demand_series=demand_series,
-                        target=target_key,
-                        progress_callback=_lstm_progress,
-                        param_search_mode=lstm_search_mode,
-                        gen_series=gen_series_rb,
-                        selected_lookback=st.session_state.get(SELECTED_LOOKBACK),
-                        exog_series=exog_series_for_training or None,
-                    )
+                    with st.spinner(f"Training LSTM — {target_desc}…"):
+                        lstm_para = train_all_lstm_parallel(
+                            sip_series=sip_series, mip_series=mip_series,
+                            demand_series=demand_series, gen_series=gen_series_rb,
+                            targets=selected_targets, param_search_mode=lstm_search_mode,
+                            selected_lookback=selected_lookback,
+                            progress_callbacks={t: _make_lstm_cb(t) for t in selected_targets},
+                            exog_series=exog_series_for_training or None,
+                        )
                 except Exception as exc:
                     st.error(f"LSTM training failed: {exc}")
                     logger.exception("LSTM training error")
-                    trained_lstm = None
+                    lstm_para = None
 
-                if trained_lstm is not None:
-                    progress_bar.empty()
-                    status_text.empty()
-                    save_trained_lstm_models(trained_lstm, target=target_key)
-                    st.session_state[ss_key_lstm] = trained_lstm
-                    _display_lstm_training_summary(trained_lstm)
-
-                    rb_key_prefix = f"_rb_{target_key}_{method_key}"
-                    st.session_state[f"{rb_key_prefix}_errors"]    = trained_lstm.backtest_errors
-                    st.session_state[f"{rb_key_prefix}_crossovers"] = trained_lstm.backtest_crossovers
-                    st.session_state["_rb_last_key"] = rb_key_prefix
-                    st.success(
-                        f"{mode_label} LSTM {target_desc} training complete — "
-                        f"{len(trained_lstm.backtest_errors)} backtest configurations evaluated. "
-                        f"Model saved to disk."
-                    )
+                if lstm_para is not None:
+                    for t, trained_lstm in lstm_para.models.items():
+                        save_trained_lstm_models(trained_lstm, target=t)
+                        st.session_state[f"_lstm_trained_models_{t}"] = trained_lstm
+                        rb_key_prefix = f"_rb_{t}_{_lstm_method_key}"
+                        st.session_state[f"{rb_key_prefix}_errors"] = trained_lstm.backtest_errors
+                        st.session_state[f"{rb_key_prefix}_crossovers"] = trained_lstm.backtest_crossovers
+                        st.session_state["_rb_last_key"] = rb_key_prefix
+                    for t, err in lstm_para.errors.items():
+                        st.error(f"{_TARGET_DESC[t]} LSTM failed: {err}")
+                    if lstm_para.models:
+                        st.success(
+                            f"{mode_label} LSTM training complete in {lstm_para.elapsed_seconds:.0f}s — "
+                            f"trained: {', '.join(_TARGET_DESC[t] for t in lstm_para.models)}"
+                        )
+                    _first_lstm = next(iter(lstm_para.models.values()), None)
+                    if _first_lstm:
+                        _display_lstm_training_summary(_first_lstm)
 
         if lstm_show_btn:
-            trained_lstm = st.session_state.get(ss_key_lstm)
-            if trained_lstm is None:
-                trained_lstm = load_trained_lstm_models(target=target_key)
-                if trained_lstm is not None:
-                    st.session_state[ss_key_lstm] = trained_lstm
-
-            if trained_lstm is None:
-                st.info(
-                    f"No trained {target_desc} LSTM model found. "
-                    f"Press one of the training buttons first."
-                )
-            else:
-                import datetime as dt
+            import datetime as dt
+            for t in selected_targets:
+                trained_lstm = st.session_state.get(f"_lstm_trained_models_{t}") or load_trained_lstm_models(target=t)
+                if trained_lstm is None:
+                    st.info(f"No trained {_TARGET_DESC[t]} LSTM model found.")
+                    continue
+                st.session_state[f"_lstm_trained_models_{t}"] = trained_lstm
                 ts = dt.datetime.fromtimestamp(trained_lstm.training_timestamp)
-                st.caption(f"Loaded {target_desc} LSTM model trained at **{ts:%Y-%m-%d %H:%M}**")
-                _display_lstm_training_summary(trained_lstm)
-
-                rb_key_prefix = f"_rb_{target_key}_{method_key}"
-                st.session_state[f"{rb_key_prefix}_errors"]    = trained_lstm.backtest_errors
+                st.caption(f"{_TARGET_DESC[t]} LSTM — trained **{ts:%Y-%m-%d %H:%M}**")
+                rb_key_prefix = f"_rb_{t}_{_lstm_method_key}"
+                st.session_state[f"{rb_key_prefix}_errors"] = trained_lstm.backtest_errors
                 st.session_state[f"{rb_key_prefix}_crossovers"] = trained_lstm.backtest_crossovers
                 st.session_state["_rb_last_key"] = rb_key_prefix
+            _first_lstm = st.session_state.get(f"_lstm_trained_models_{target_key}")
+            if _first_lstm:
+                _display_lstm_training_summary(_first_lstm)
 
-        # Hybrid — additionally show XGBoost component status
-        if method_key == "hybrid":
+        # Hybrid — additionally show XGBoost component status for primary target
+        if "hybrid" in selected_methods:
             st.markdown("---")
             st.subheader(f"Hybrid Ensemble — {target_desc}")
             st.caption(
                 "The Hybrid forecast combines LSTM + XGBoost predictions using inverse-MAE "
                 "weighting: the model with lower validation error gets higher weight."
             )
-            trained_lstm_h = st.session_state.get(ss_key_lstm) or load_trained_lstm_models(target_key)
-            trained_xgb_h  = st.session_state.get(ss_key_xgb)  or load_trained_models(target=target_key)
-            c_l, c_x = st.columns(2)
-            with c_l:
-                if trained_lstm_h is not None:
-                    import datetime as dt
-                    ts_l = dt.datetime.fromtimestamp(trained_lstm_h.training_timestamp)
-                    st.success(f"LSTM trained at {ts_l:%Y-%m-%d %H:%M}")
-                else:
-                    st.warning("LSTM model not found — train above first.")
-            with c_x:
-                if trained_xgb_h is not None:
-                    import datetime as dt
-                    ts_x = dt.datetime.fromtimestamp(trained_xgb_h.training_timestamp)
-                    st.success(f"XGBoost trained at {ts_x:%Y-%m-%d %H:%M}")
-                else:
-                    st.warning("XGBoost model not found — switch to XGBoost tab and train.")
+            import datetime as dt
+            for t in selected_targets:
+                trained_lstm_h = st.session_state.get(f"_lstm_trained_models_{t}") or load_trained_lstm_models(t)
+                trained_xgb_h  = st.session_state.get(f"_xgb_trained_models_{t}")  or load_trained_models(target=t)
+                c_l, c_x, c_w = st.columns(3)
+                with c_l:
+                    if trained_lstm_h:
+                        st.success(f"{_TARGET_DESC[t]} LSTM: {dt.datetime.fromtimestamp(trained_lstm_h.training_timestamp):%H:%M}")
+                    else:
+                        st.warning(f"{_TARGET_DESC[t]} LSTM: not trained")
+                with c_x:
+                    if trained_xgb_h:
+                        st.success(f"{_TARGET_DESC[t]} XGBoost: {dt.datetime.fromtimestamp(trained_xgb_h.training_timestamp):%H:%M}")
+                    else:
+                        st.warning(f"{_TARGET_DESC[t]} XGBoost: not trained")
+                with c_w:
+                    if trained_lstm_h and trained_xgb_h:
+                        from src.models.hybrid_forecaster import _best_val_mae
+                        w_l = _best_val_mae(trained_lstm_h)
+                        w_x = _best_val_mae(trained_xgb_h)
+                        if w_l and w_x:
+                            total = (1 / w_l) + (1 / w_x)
+                            pct_l = round(100 * (1 / w_l) / total)
+                            st.caption(f"Weights: LSTM {pct_l}% · XGBoost {100 - pct_l}%")
 
-            if trained_lstm_h is not None and trained_xgb_h is not None:
-                from src.models.hybrid_forecaster import _best_val_mae
-                w_lstm_raw = _best_val_mae(trained_lstm_h)
-                w_xgb_raw  = _best_val_mae(trained_xgb_h)
-                if w_lstm_raw and w_xgb_raw:
-                    total = (1 / w_lstm_raw) + (1 / w_xgb_raw)
-                    pct_l = round(100 * (1 / w_lstm_raw) / total)
-                    pct_x = 100 - pct_l
-                    st.metric("LSTM weight", f"{pct_l}%", help="Based on inverse validation MAE")
-                    st.metric("XGBoost weight", f"{pct_x}%")
-
-    elif method_key == "neuralprophet":
-        # ── NeuralProphet: full training workflow (mirrors XGBoost) ──────────
-        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
-        ss_key = f"_np_trained_models_{target_key}"
-
+    if "neuralprophet" in selected_methods:
+        # ── NeuralProphet: full training workflow ──────────────────────────
         st.markdown("---")
-        st.subheader(f"NeuralProphet {target_desc} Model Training")
+        st.subheader(f"NeuralProphet Model Training — {target_desc}")
         st.caption(
-            f"Train a **{target_desc}** NeuralProphet model, then view results anytime. "
-            "Models are stored separately per target and persist across sessions."
+            "Trains one NeuralProphet model per selected target. Multiple targets run in parallel."
         )
 
         col_deep, col_quick, col_show = st.columns(3)
         with col_deep:
             np_deep_btn = st.button(
-                f"🏋️ In-Depth Search ({target_desc})",
-                use_container_width=True,
-                type="primary",
-                key="rb_np_deep",
-                help="Systematic 3×3×2 = 18 combos over n_lags, epochs, learning_rate. "
-                     "Takes several minutes. Run periodically for best accuracy.",
+                "🏋️ In-Depth Search",
+                use_container_width=True, type="primary", key="rb_np_deep",
+                help="18 combos over n_lags, epochs, learning_rate. Takes several minutes.",
             )
         with col_quick:
             np_quick_btn = st.button(
-                f"⚡ Quick Random Search ({target_desc})",
-                use_container_width=True,
-                key="rb_np_quick",
-                help="6 random combos — faster estimate for point-in-time tuning.",
+                "⚡ Quick Random Search",
+                use_container_width=True, key="rb_np_quick",
+                help="6 random combos — faster estimate.",
             )
         with col_show:
             np_show_btn = st.button(
-                f"📊 Show {target_desc} Results",
-                use_container_width=True,
-                key="rb_np_show",
-                help=f"Load and display results from the last trained {target_desc} NP model.",
+                "📊 Show Results",
+                use_container_width=True, key="rb_np_show",
+                help="Load and display results from the last trained NP models.",
             )
 
-        np_search_mode = None
-        if np_deep_btn:
-            np_search_mode = "grid"
-        elif np_quick_btn:
-            np_search_mode = "random"
+        np_search_mode = "grid" if np_deep_btn else ("random" if np_quick_btn else None)
+
+        # NeuralProphet only supports SIP/MIP/Demand (not generation)
+        _np_targets = [t for t in selected_targets if t != "total_generation"]
 
         if np_search_mode is not None:
             mode_label = "In-depth grid" if np_search_mode == "grid" else "Quick random"
-            with st.spinner("Aligning SIP, MIP and Demand series…"):
+            with st.spinner("Aligning series…"):
                 sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
-            n_days = len(sip_series) // 48
-            if n_days < 45:
-                st.error(
-                    f"Need at least 45 days of aligned data. "
-                    f"Currently have {n_days} days. Increase the date range."
-                )
+            if len(sip_series) // 48 < 45:
+                st.error(f"Need at least 45 days of data. Currently {len(sip_series)//48} days.")
                 return
 
-            progress_bar = st.progress(0.0)
-            status_text = st.empty()
+            _st_ctx_np = get_script_run_ctx()
+            np_para_bars = {t: st.progress(0.0, text=_TARGET_DESC[t]) for t in _np_targets}
 
-            def _np_progress(frac: float, msg: str) -> None:
-                progress_bar.progress(min(frac, 1.0))
-                status_text.caption(msg)
+            def _make_np_cb(tgt):
+                def _cb(frac, msg):
+                    add_script_run_ctx(threading.current_thread(), _st_ctx_np)
+                    np_para_bars[tgt].progress(min(float(frac), 1.0), text=msg)
+                return _cb
 
             try:
-                trained_np = train_np_models(
-                    sip_series, mip_series,
-                    demand_series=demand_series,
-                    target=target_key,
-                    progress_callback=_np_progress,
-                    param_search_mode=np_search_mode,
-                )
+                with st.spinner(f"Training NeuralProphet — {target_desc}…"):
+                    np_para = train_all_np_parallel(
+                        sip_series=sip_series, mip_series=mip_series,
+                        demand_series=demand_series,
+                        targets=_np_targets, param_search_mode=np_search_mode,
+                        progress_callbacks={t: _make_np_cb(t) for t in _np_targets},
+                    )
             except Exception as exc:
                 st.error(f"NeuralProphet training failed: {exc}")
                 logger.exception("NeuralProphet training error")
                 return
-            progress_bar.empty()
-            status_text.empty()
 
-            save_np_models(trained_np, target=target_key)
-            st.session_state[ss_key] = trained_np
-
-            _display_np_training_summary(trained_np)
-
-            rb_key_prefix = f"_rb_{target_key}_{method_key}"
-            st.session_state[f"{rb_key_prefix}_errors"] = trained_np.backtest_errors
-            st.session_state[f"{rb_key_prefix}_crossovers"] = trained_np.backtest_crossovers
-            st.session_state["_rb_last_key"] = rb_key_prefix
-            st.success(
-                f"{mode_label} {target_desc} NP training complete — "
-                f"{len(trained_np.backtest_errors)} backtest configurations evaluated. "
-                f"Model saved to disk."
-            )
+            for t, trained_np in np_para.models.items():
+                save_np_models(trained_np, target=t)
+                st.session_state[f"_np_trained_models_{t}"] = trained_np
+                rb_key_prefix = f"_rb_{t}_neuralprophet"
+                st.session_state[f"{rb_key_prefix}_errors"] = trained_np.backtest_errors
+                st.session_state[f"{rb_key_prefix}_crossovers"] = trained_np.backtest_crossovers
+                st.session_state["_rb_last_key"] = rb_key_prefix
+            for t, err in np_para.errors.items():
+                st.error(f"{_TARGET_DESC[t]} NeuralProphet failed: {err}")
+            if np_para.models:
+                st.success(
+                    f"{mode_label} NeuralProphet training complete in {np_para.elapsed_seconds:.0f}s — "
+                    f"trained: {', '.join(_TARGET_DESC[t] for t in np_para.models)}"
+                )
+            _first_np = next(iter(np_para.models.values()), None)
+            if _first_np:
+                _display_np_training_summary(_first_np)
 
         if np_show_btn:
-            trained_np = st.session_state.get(ss_key)
-            if trained_np is None:
-                trained_np = load_np_models(target=target_key)
-                if trained_np is not None:
-                    st.session_state[ss_key] = trained_np
-
-            if trained_np is None:
-                st.info(
-                    f"No trained {target_desc} NeuralProphet model found. "
-                    f"Press one of the training buttons first."
-                )
-                return
-
             import datetime as dt
-            ts = dt.datetime.fromtimestamp(trained_np.training_timestamp)
-            age_hours = (dt.datetime.now() - ts).total_seconds() / 3600
-            st.caption(f"Loaded {target_desc} NP model trained at **{ts:%Y-%m-%d %H:%M}**")
-            if age_hours > 24:
-                st.warning(
-                    f"This NeuralProphet model is **{age_hours:.0f} hours old**. "
-                    "Forecasts may not reflect recent price movements — consider re-training."
-                )
-            _display_np_training_summary(trained_np)
+            for t in _np_targets:
+                trained_np = st.session_state.get(f"_np_trained_models_{t}") or load_np_models(target=t)
+                if trained_np is None:
+                    st.info(f"No trained {_TARGET_DESC[t]} NeuralProphet model found.")
+                    continue
+                st.session_state[f"_np_trained_models_{t}"] = trained_np
+                ts = dt.datetime.fromtimestamp(trained_np.training_timestamp)
+                age_hours = (dt.datetime.now() - ts).total_seconds() / 3600
+                st.caption(f"{_TARGET_DESC[t]} NP — trained **{ts:%Y-%m-%d %H:%M}**")
+                if age_hours > 24:
+                    st.warning(f"{_TARGET_DESC[t]} NP model is {age_hours:.0f}h old — consider re-training.")
+                rb_key_prefix = f"_rb_{t}_neuralprophet"
+                st.session_state[f"{rb_key_prefix}_errors"] = trained_np.backtest_errors
+                st.session_state[f"{rb_key_prefix}_crossovers"] = trained_np.backtest_crossovers
+                st.session_state["_rb_last_key"] = rb_key_prefix
+            _first_np = st.session_state.get(f"_np_trained_models_{target_key}")
+            if _first_np:
+                _display_np_training_summary(_first_np)
 
-            rb_key_prefix = f"_rb_{target_key}_{method_key}"
-            st.session_state[f"{rb_key_prefix}_errors"] = trained_np.backtest_errors
-            st.session_state[f"{rb_key_prefix}_crossovers"] = trained_np.backtest_crossovers
-            st.session_state["_rb_last_key"] = rb_key_prefix
+    if method_key in ("tod_mean", "ewma"):
+        # ── TOD Mean / EWMA: run per selected target ──────────────────────────
+        _m_disp = {"tod_mean": "TOD Mean", "ewma": "EWMA"}[method_key]
 
-    else:
-        # ── TOD Mean / EWMA: standard single-button flow ──────────────────────
-        target_desc = _TARGET_DESC.get(target_key, "Price (SIP)")
+        st.markdown("---")
+        st.subheader(f"{_m_disp} Backtest — {target_desc}")
+
         run_btn = st.button(
-            f"🔬 Run {target_desc} Rolling Backtest ({method})",
-            use_container_width=True,
-            type="primary",
-            key="rb_run",
+            f"🔬 Run {_m_disp} Rolling Backtest",
+            use_container_width=True, type="primary", key=f"rb_run_{method_key}",
         )
 
         if run_btn:
@@ -751,38 +698,26 @@ def _render_rolling_backtest_body() -> None:
                 sip_series, mip_series, demand_series, _ = build_aligned_series(
                     sip_df, mip_df, demand_df=demand_df,
                 )
-
             n_days = len(sip_series) // 48
             if n_days < 45:
-                st.error(
-                    f"Need at least 45 days of aligned data for a meaningful rolling backtest. "
-                    f"Currently have {n_days} days. Increase the date range."
-                )
+                st.error(f"Need at least 45 days. Currently {n_days} days.")
                 return
 
-            st.caption(f"Data: {len(sip_series):,} SPs ({n_days} days) — "
-                       f"{sip_series.index[0]} → {sip_series.index[-1]}  |  "
-                       f"Target: **{target_desc}**  |  Method: **{method}**")
-
-            spinner_msg = (
-                f"Running rolling backtest ({method}, {target_desc}, "
-                f"1/5/15/30-day lookbacks × 1-14 day horizons)…"
-            )
-            with st.spinner(spinner_msg):
-                errors, crossovers = run_rolling_backtest(
-                    sip_series, mip_series,
-                    method=method_key,
-                    ewma_alpha=ewma_alpha,
-                    target=target_key,
-                    demand_series=demand_series,
-                    gen_series=gen_series_rb,
-                )
-
-            rb_key_prefix = f"_rb_{target_key}_{method_key}"
-            st.session_state[f"{rb_key_prefix}_errors"] = errors
-            st.session_state[f"{rb_key_prefix}_crossovers"] = crossovers
-            st.session_state["_rb_last_key"] = rb_key_prefix
-            st.success(f"Rolling backtest complete — {len(errors)} configurations evaluated.")
+            for _t in selected_targets:
+                with st.spinner(f"Running {_m_disp} backtest — {_TARGET_DESC[_t]}…"):
+                    errors, crossovers = run_rolling_backtest(
+                        sip_series, mip_series,
+                        method=method_key,
+                        ewma_alpha=ewma_alpha,
+                        target=_t,
+                        demand_series=demand_series,
+                        gen_series=gen_series_rb,
+                    )
+                rb_key_prefix = f"_rb_{_t}_{method_key}"
+                st.session_state[f"{rb_key_prefix}_errors"] = errors
+                st.session_state[f"{rb_key_prefix}_crossovers"] = crossovers
+                st.session_state["_rb_last_key"] = rb_key_prefix
+                st.success(f"{_TARGET_DESC[_t]} — {len(errors)} configurations evaluated.")
 
     # ── Train All Models Simultaneously ───────────────────────────────
     st.markdown("---")
@@ -1020,13 +955,7 @@ def _render_rolling_backtest_body() -> None:
                 )
 
     # ── Model Diagnostics (XGBoost / LSTM) ───────────────────────────
-    if method_key in ("xgb", "lstm", "hybrid"):
-        _diag_key = (
-            f"_xgb_trained_models_{target_key}" if method_key == "xgb"
-            else f"_lstm_trained_models_{target_key}"
-        )
-        _trained_diag = st.session_state.get(_diag_key)
-    if method_key == "xgb":
+    if "xgb" in selected_methods:
         _trained_diag = st.session_state.get(f"_xgb_trained_models_{target_key}")
         if _trained_diag is not None and getattr(_trained_diag, "grid_search_history", None):
             st.markdown("---")
@@ -1550,7 +1479,7 @@ def _display_lstm_training_summary(trained) -> None:
 
 
 def _render_forward_forecast() -> None:
-    """Show 14-day forward forecasts from trained XGBoost and/or NeuralProphet models."""
+    """Show 14-day forward forecasts from trained XGBoost, LSTM and/or NeuralProphet models."""
     sip_df = st.session_state.get(SIP_DF)
     mip_df = st.session_state.get(MIP_DF)
     demand_df = st.session_state.get(DEMAND_DF)
@@ -1558,11 +1487,16 @@ def _render_forward_forecast() -> None:
     if sip_df is None or sip_df.empty or mip_df is None or mip_df.empty:
         return
 
-    # Collect all available trained models (XGBoost + NeuralProphet)
+    # Collect all available trained models
     xgb_models = {
         "Price (SIP)":      (st.session_state.get("_xgb_trained_models_sip"),    "£/MWh", "Predicted SIP (£/MWh)"),
         "Wholesale (MIP)":  (st.session_state.get("_xgb_trained_models_mip"),    "£/MWh", "Predicted MIP (£/MWh)"),
         "Demand":           (st.session_state.get("_xgb_trained_models_demand"), "MW",    "Predicted Demand (MW)"),
+    }
+    lstm_models = {
+        "Price (SIP)":      (st.session_state.get("_lstm_trained_models_sip"),    "£/MWh", "Predicted SIP (£/MWh)"),
+        "Wholesale (MIP)":  (st.session_state.get("_lstm_trained_models_mip"),    "£/MWh", "Predicted MIP (£/MWh)"),
+        "Demand":           (st.session_state.get("_lstm_trained_models_demand"), "MW",    "Predicted Demand (MW)"),
     }
     np_models = {
         "Price (SIP)":      (st.session_state.get("_np_trained_models_sip"),     "£/MWh", "Predicted SIP (£/MWh)"),
@@ -1570,13 +1504,16 @@ def _render_forward_forecast() -> None:
         "Demand":           (st.session_state.get("_np_trained_models_demand"),  "MW",    "Predicted Demand (MW)"),
     }
 
-    has_xgb = any(t is not None and t.final_models for t, _, _ in xgb_models.values())
-    has_np  = any(t is not None and t.forward_forecasts for t, _, _ in np_models.values())
+    has_xgb  = any(t is not None and t.final_models for t, _, _ in xgb_models.values())
+    has_lstm = any(t is not None and t.final_state_dicts for t, _, _ in lstm_models.values())
+    has_np   = any(t is not None and t.forward_forecasts for t, _, _ in np_models.values())
 
-    if not has_xgb and not has_np:
+    if not has_xgb and not has_lstm and not has_np:
         return
 
     from src.models.forecaster import build_aligned_series
+    from src.models.xgb_trainer import _align_to_target as _xgb_align
+    from src.models.lstm_trainer import _align_to_target as _lstm_align
 
     sip_series, mip_series, demand_series, _ = build_aligned_series(
         sip_df, mip_df, demand_df=demand_df,
@@ -1585,6 +1522,19 @@ def _render_forward_forecast() -> None:
     mip_values    = mip_series.values.astype(float)
     demand_values = demand_series.values.astype(float) if demand_series is not None else None
     last_date     = sip_series.index[-1]
+
+    _stored_exog: dict = st.session_state.get(EXOG_SERIES) or {}
+
+    from src.models.xgb_trainer import TrainedXGBModels as _TrainedXGBModels
+
+    def _build_exog(trained, target_series):
+        """Reconstruct exog_dict for a trained model using stored exog series."""
+        exog_keys = getattr(trained, "exog_keys", [])
+        if not exog_keys or not _stored_exog:
+            return None
+        align_fn = _xgb_align if isinstance(trained, _TrainedXGBModels) else _lstm_align
+        result = {k: align_fn(target_series, _stored_exog[k]) for k in exog_keys if k in _stored_exog}
+        return result if result else None
 
     lb_colours = {
         "1 day":  COLOUR_PRIMARY,
@@ -1597,20 +1547,35 @@ def _render_forward_forecast() -> None:
     st.subheader("6. 14-Day Forward Forecast")
     st.caption(
         "Point forecasts from the latest data point using trained models. "
-        "XGBoost and NeuralProphet forecasts are shown side-by-side when both are available."
+        "XGBoost, LSTM and NeuralProphet forecasts are shown side-by-side when available."
     )
+
+    _label_to_series = {
+        "Price (SIP)":     sip_series,
+        "Wholesale (MIP)": mip_series,
+        "Demand":          demand_series if demand_series is not None else sip_series,
+    }
 
     labels_shown = set()
     for label in ["Price (SIP)", "Wholesale (MIP)", "Demand"]:
-        xgb_trained, unit, y_label = xgb_models[label]
-        np_trained,  _,    _       = np_models[label]
+        xgb_trained,  unit, y_label = xgb_models[label]
+        lstm_trained, _,    _       = lstm_models[label]
+        np_trained,   _,    _       = np_models[label]
 
-        xgb_fc = forecast_forward(xgb_trained, sip_values, mip_values, demand_values, n_days=14) \
-                 if xgb_trained is not None and xgb_trained.final_models else {}
+        _ref_series = _label_to_series[label]
+
+        xgb_fc = forecast_forward(
+            xgb_trained, sip_values, mip_values, demand_values, n_days=14,
+            exog_dict=_build_exog(xgb_trained, _ref_series),
+        ) if xgb_trained is not None and xgb_trained.final_models else {}
+        lstm_fc = lstm_forecast_forward(
+            lstm_trained, sip_values, mip_values, demand_values, n_days=14,
+            exog_dict=_build_exog(lstm_trained, _ref_series),
+        ) if lstm_trained is not None and lstm_trained.final_state_dicts else {}
         np_fc  = forecast_forward_np(np_trained) \
                  if np_trained is not None and np_trained.forward_forecasts else {}
 
-        if not xgb_fc and not np_fc:
+        if not xgb_fc and not lstm_fc and not np_fc:
             continue
 
         labels_shown.add(label)
@@ -1629,6 +1594,21 @@ def _render_forward_forecast() -> None:
                 name=f"XGB {lb_label}",
                 line=dict(color=colour, width=2),
                 marker=dict(size=6),
+            ))
+
+        for lb_label, day_forecasts in lstm_fc.items():
+            if not day_forecasts:
+                continue
+            days   = sorted(day_forecasts.keys())
+            dates  = [last_date + pd.Timedelta(days=d) for d in days]
+            vals   = [day_forecasts[d] for d in days]
+            colour = lb_colours.get(lb_label, COLOUR_MUTED)
+            fig.add_trace(go.Scatter(
+                x=dates, y=vals,
+                mode="lines+markers",
+                name=f"LSTM {lb_label}",
+                line=dict(color=colour, width=2, dash="dash"),
+                marker=dict(size=6, symbol="square"),
             ))
 
         for lb_label, day_forecasts in np_fc.items():
@@ -1662,6 +1642,14 @@ def _render_forward_forecast() -> None:
             for d in sorted(day_forecasts.keys()):
                 fc_rows.append({
                     "Model": f"XGBoost ({lb_label})",
+                    "Day Ahead": d,
+                    "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
+                    f"Forecast ({unit})": f"{day_forecasts[d]:.2f}",
+                })
+        for lb_label, day_forecasts in lstm_fc.items():
+            for d in sorted(day_forecasts.keys()):
+                fc_rows.append({
+                    "Model": f"LSTM ({lb_label})",
                     "Day Ahead": d,
                     "Date": (last_date + pd.Timedelta(days=d)).strftime("%Y-%m-%d"),
                     f"Forecast ({unit})": f"{day_forecasts[d]:.2f}",

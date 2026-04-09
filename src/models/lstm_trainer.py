@@ -396,7 +396,9 @@ def train_lstm_models(
     # Align exog series and append as extra channels
     target_series_for_align = {
         "demand": demand_series, "mip": mip_series, "total_generation": gen_series,
-    }.get(target, sip_series) or sip_series
+    }.get(target, sip_series)
+    if target_series_for_align is None:
+        target_series_for_align = sip_series
     exog_arrays: List[np.ndarray] = []
     if exog_series:
         for s in exog_series.values():
@@ -526,7 +528,9 @@ def _backtest_with_final_models(
 
     target_series_for_align = {
         "demand": demand_series, "mip": mip_series, "total_generation": gen_series,
-    }.get(target, sip_series) or sip_series
+    }.get(target, sip_series)
+    if target_series_for_align is None:
+        target_series_for_align = sip_series
     exog_arrays: List[np.ndarray] = []
     if exog_series:
         for s in exog_series.values():
