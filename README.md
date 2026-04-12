@@ -1,4 +1,4 @@
-# EV Flexibility Portfolio Imbalance Exposure Simulator - WIP Version
+# EV Flexibility Portfolio Imbalance Exposure Simulator
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ev-imbalance-simulator-oc8ybuvakhkkggxjh5amr8.streamlit.app/)
 
