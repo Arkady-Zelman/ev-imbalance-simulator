@@ -1,0 +1,40 @@
+name: Daily prediction refresh
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 07:00 UTC every day (after ELEXON data settles)
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Use a PAT so the push step can trigger downstream workflows
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate predictions
+        run: python -m backend.predict
+
+      - name: Commit updated predictions
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/predictions/
+          # Only commit if something actually changed
+          git diff --staged --quiet || \
+            git commit -m "chore: daily predictions $(date -u +%Y-%m-%d) [skip ci]"
+          git push

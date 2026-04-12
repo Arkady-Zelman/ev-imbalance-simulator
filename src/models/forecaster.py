@@ -253,9 +253,6 @@ def run_walk_forward_backtest(
                 sip_values, idx, lookback_sps, horizons,
                 mip_values=mip_values, demand_values=demand_values,
             )
-        elif method == "neuralprophet":
-            from src.models.prophet_forecaster import _neuralprophet_forecast
-            fc = _neuralprophet_forecast(sip_values, idx, lookback_sps, horizons)
         elif method == "ewma":
             fc = _ewma_forecast(sip_values, idx, lookback_sps, horizons, alpha=ewma_alpha)
         else:

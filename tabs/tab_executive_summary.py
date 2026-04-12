@@ -1,152 +1,208 @@
-"""Executive Summary tab -- KPI cards, traffic-light indicator, narrative."""
+"""
+Tab 3 — Executive Summary
+
+KPIs: Expected P&L, VaR (95%), Expected Shortfall (95%),
+      Total Capacity, Traded Capacity by Market.
+
+Reads from session state Monte Carlo result and allocation result.
+"""
 
 from __future__ import annotations
 
-import platform
-import sys
+import logging
+from typing import Optional
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.config import CHARGER_CAPACITY_KW, COLOUR_PRIMARY, PLOTLY_TEMPLATE
-from src.session_keys import PARAMS, RESULT, RISK_SUMMARY
+import src.session_keys as sk
+from src.config import (
+    CHARGER_CAPACITY_KW,
+    DEFAULT_DA_PRICE,
+    DEFAULT_DISPATCH_SUCCESS_RATE,
+    DEFAULT_FLEET_SIZE,
+    DEFAULT_MC_RUNS,
+    DEFAULT_OVERRIDE_RATE,
+    DEFAULT_RISK_APPETITE,
+    RISK_APPETITES,
+)
+
+logger = logging.getLogger(__name__)
+
+PLOTLY_TEMPLATE = "plotly_dark"
 
 
-def render(has_results: bool) -> None:
+def _traffic_light(ratio: float) -> str:
+    if ratio >= 0.6:
+        return "🟢 GREEN"
+    if ratio >= 0.3:
+        return "🟡 AMBER"
+    return "🔴 RED"
+
+
+def _run_mc_if_needed(params: dict, sip_df=None) -> Optional[object]:
+    try:
+        from src.models.monte_carlo import SimulationParams, run_simulation, prepare_sip_matrix
+        da_price = params.pop("da_price", DEFAULT_DA_PRICE)
+        p = SimulationParams(**params)
+        sip_matrix, _ = prepare_sip_matrix(sip_df if sip_df is not None else __import__("pandas").DataFrame())
+        return run_simulation(p, sip_matrix, da_price=da_price)
+    except Exception as exc:
+        logger.error("MC simulation failed: %s", exc)
+        return None
+
+
+def render() -> None:
     st.header("Executive Summary")
 
-    if not has_results:
-        st.info("Configure parameters in the sidebar and click **Run Simulation** to generate results.")
+    predictions_loaded: bool = st.session_state.get(sk.PREDICTIONS_LOADED, False)
+
+    # ── Read shared parameters from unified sidebar ───────────────────────────
+    fleet_size    = st.session_state.get(sk.SIM_FLEET_SIZE,    DEFAULT_FLEET_SIZE)
+    dispatch_rate = st.session_state.get(sk.SIM_DISPATCH_RATE, DEFAULT_DISPATCH_SUCCESS_RATE)
+    override_rate = st.session_state.get(sk.SIM_OVERRIDE_RATE, DEFAULT_OVERRIDE_RATE)
+    da_price      = float(st.session_state.get(sk.DA_PRICE,    DEFAULT_DA_PRICE))
+    risk_app      = st.session_state.get(sk.SIM_RISK_APPETITE, DEFAULT_RISK_APPETITE)
+    mc_runs       = st.session_state.get(sk.SIM_MC_RUNS,       DEFAULT_MC_RUNS)
+    run_btn       = st.session_state.get(sk.SIM_RUN_REQUESTED, False)
+
+    # ── Load or run simulation ────────────────────────────────────────────────
+    result = st.session_state.get(sk.RESULT)
+
+    if run_btn or result is None:
+        mc_params = dict(
+            fleet_size=fleet_size,
+            dispatch_rate=dispatch_rate,
+            override_rate=override_rate,
+            da_price=da_price,
+            n_runs=mc_runs,
+        )
+        with st.spinner("Running Monte Carlo simulation…"):
+            result = _run_mc_if_needed(mc_params, sip_df=st.session_state.get(sk.SIP_DF))
+        if result:
+            st.session_state[sk.RESULT] = result
+
+    if result is None:
+        st.info("Click **Run Simulation** to generate results.")
         return
 
-    result = st.session_state[RESULT]
-    risk = st.session_state[RISK_SUMMARY]
-    params = st.session_state[PARAMS]
+    # ── Extract metrics ───────────────────────────────────────────────────────
+    try:
+        pnl_dist = np.asarray(result.daily_pnl,             dtype=float)
+        rev_dist = np.asarray(result.daily_revenue,          dtype=float)
+        imb_dist = np.asarray(result.daily_imbalance_cost,   dtype=float)
+    except AttributeError:
+        st.error("Simulation result format unexpected. Please re-run.")
+        return
 
-    # ── KPI cards ──────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Expected Daily P&L", f"£{risk.mean_pnl:,.0f}",
-                   delta=f"median £{risk.median_pnl:,.0f}")
-    with c2:
-        st.metric("VaR (95%)", f"£{risk.var_95:,.0f}",
-                   help="On 95% of days, losses will not exceed this amount")
-    with c3:
-        st.metric("ES (95%)", f"£{risk.es_95:,.0f}",
-                   help="Expected Shortfall: mean P&L on the worst 5% of days")
-    with c4:
-        st.metric("Capture Ratio", f"{risk.capture_ratio_mean:.3f}",
-                   help="Actual revenue / benchmark revenue (1.0 = perfect)")
+    expected_pnl = float(np.mean(pnl_dist))
+    pct = RISK_APPETITES[risk_app]
+    var_95       = float(np.percentile(pnl_dist, 5))   # 5th pct = 95% VaR loss
+    es_95        = float(np.mean(pnl_dist[pnl_dist <= var_95]))
+    total_cap_mw = fleet_size * CHARGER_CAPACITY_KW / 1000.0
 
-    c5, c6, c7, c8 = st.columns(4)
-    max_mw = params.fleet_size * CHARGER_CAPACITY_KW / 1_000
-    traded_total_mwh = float(np.sum(result.traded_mw) * 0.5)
-    with c5:
-        st.metric("Fleet Size", f"{params.fleet_size:,} chargers")
-    with c6:
-        st.metric("Max Theoretical MW", f"{max_mw:,.1f} MW")
-    with c7:
-        st.metric("Daily Traded Volume", f"{traded_total_mwh:,.1f} MWh")
-    with c8:
-        st.metric("Reward-to-Risk", f"{risk.reward_to_risk:.2f}",
-                   help="Mean(P&L) / Std(P&L) — within-day signal-to-noise ratio, not a true Sharpe")
-
-
-    # ── Traffic-light risk indicator ──────────────────────────────────
-    st.markdown("---")
-    st.subheader("Risk Status")
-
-    es_abs = abs(risk.es_95)
-    daily_rev = float(risk.mean_pnl + np.mean(result.daily_imbalance_cost))
-
-    if daily_rev > 0:
-        risk_ratio = es_abs / daily_rev
+    # Traded capacity from allocation result if available
+    allocation = st.session_state.get(sk.ALLOCATION_RESULT)
+    if allocation:
+        wholesale_mw = float(np.mean(np.asarray(allocation.get("wholesale_mw", [0] * 48))))
+        balancing_mw = float(np.mean(np.asarray(allocation.get("balancing_mw", [0] * 48))))
     else:
-        risk_ratio = 10.0
+        # Fall back to percentile from distribution
+        wholesale_mw = total_cap_mw * pct / 100.0 * 0.6
+        balancing_mw = total_cap_mw * pct / 100.0 * 0.4
 
-    if risk_ratio < 0.5:
-        colour, label, desc = "🟢", "LOW RISK", "ES is well within daily revenue capacity."
-    elif risk_ratio < 1.5:
-        colour, label, desc = "🟡", "MODERATE RISK", "Tail losses could materially impact daily revenue."
-    else:
-        colour, label, desc = "🔴", "HIGH RISK", "Tail losses may exceed typical daily revenue — consider reducing traded position."
+    held_mw = max(0.0, total_cap_mw - wholesale_mw - balancing_mw)
 
-    st.markdown(f"### {colour} {label}")
-    st.caption(desc)
+    # Traffic light
+    es_to_rev = abs(es_95) / max(expected_pnl, 1.0)
+    traffic    = _traffic_light(1.0 - es_to_rev)
 
-    # ── P&L sparkline ─────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("P&L Distribution (mini)")
-    fig = go.Figure()
-    fig.add_trace(go.Histogram(
-        x=result.daily_pnl, nbinsx=60,
-        marker_color=COLOUR_PRIMARY, opacity=0.7,
-    ))
-    fig.update_layout(
-        template=PLOTLY_TEMPLATE,
-        height=200,
-        margin=dict(l=30, r=20, t=10, b=30),
-        xaxis_title="Daily P&L (£)",
-        yaxis_title="",
-        showlegend=False,
+    # ── KPI rows (2-row layout) ───────────────────────────────────────────────
+    col1, col2, col3 = st.columns(3)
+    col1.metric(
+        "Expected P&L",
+        f"£{expected_pnl:,.0f}",
+        delta=f"£{expected_pnl:+,.0f}",
+        delta_color="normal",
     )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── Auto-generated narrative ──────────────────────────────────────
-    st.markdown("---")
-    st.subheader("Risk Narrative")
-
-    risk_appetite = params.risk_percentile
-    narrative = (
-        f"This simulation ran **{params.n_runs:,}** Monte Carlo scenarios for a fleet of "
-        f"**{params.fleet_size:,}** Ohme chargers ({CHARGER_CAPACITY_KW} kW each, "
-        f"theoretical max **{max_mw:,.1f} MW**). "
-        f"The traded position was sized at the **P{risk_appetite}** percentile of simulated "
-        f"availability, yielding a daily traded volume of **{traded_total_mwh:,.1f} MWh**.\n\n"
-        f"On an average day, the portfolio generates **£{risk.mean_pnl:,.0f}** in net P&L after "
-        f"imbalance costs. However, the distribution is **negatively skewed** (skew = {risk.skew_pnl:.2f}), "
-        f"reflecting the asymmetric cost of being short at high System Imbalance Prices. "
-        f"The 95% Value-at-Risk is **£{risk.var_95:,.0f}**, meaning on 95% of days losses do not "
-        f"exceed this level. On the worst 5% of days, the expected loss (Expected Shortfall) is **£{risk.es_95:,.0f}**.\n\n"
-        f"The mean capture ratio of **{risk.capture_ratio_mean:.3f}** indicates that, on average, "
+    col2.metric(
+        "VaR (95%)",
+        f"£{var_95:,.0f}",
+        delta=f"£{var_95 - expected_pnl:,.0f}",
+        delta_color="inverse",
     )
-    if risk.capture_ratio_mean >= 0.95:
-        narrative += "the portfolio captures nearly all of its theoretical benchmark revenue."
-    elif risk.capture_ratio_mean >= 0.85:
-        narrative += "imbalance costs erode a modest portion of potential revenue."
-    else:
-        narrative += "significant value is lost to imbalance costs — consider a more conservative position."
+    col3.metric(
+        "Expected Shortfall (95%)",
+        f"£{es_95:,.0f}",
+        delta=f"£{es_95 - expected_pnl:,.0f}",
+        delta_color="inverse",
+    )
+    col4, col5 = st.columns(2)
+    col4.metric("Total Capacity", f"{total_cap_mw:.1f} MW")
+    col5.metric("Risk Status", traffic)
 
-    st.markdown(narrative)
+    st.divider()
 
-    # ── Diagnostics (collapsible) ─────────────────────────────────────
-    with st.expander("Environment Diagnostics", expanded=False):
-        import importlib.metadata as _meta
+    # ── P&L distribution histogram ────────────────────────────────────────────
+    col_hist, col_donut = st.columns([6, 4])
 
-        _versions = {}
-        for _pkg in ("numpy", "scipy", "pandas", "plotly", "streamlit",
-                      "neuralprophet", "torch", "xgboost", "setuptools"):
-            try:
-                _versions[_pkg] = _meta.version(_pkg)
-            except _meta.PackageNotFoundError:
-                _versions[_pkg] = "NOT INSTALLED"
+    with col_hist:
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Histogram(
+            x=pnl_dist, nbinsx=60,
+            marker_color="#00D4AA", opacity=0.8,
+            name="P&L",
+        ))
+        fig_hist.add_vline(x=var_95, line_dash="dash", line_color="#FF6B6B",
+                           annotation_text="VaR 95%", annotation_position="top left")
+        fig_hist.add_vline(x=es_95,  line_dash="dot",  line_color="#FFE66D",
+                           annotation_text="ES 95%",  annotation_position="top left")
+        fig_hist.update_layout(
+            template=PLOTLY_TEMPLATE,
+            title="P&L Distribution (Monte Carlo)",
+            xaxis_title="P&L (£)",
+            yaxis_title="Count",
+            height=380,
+        )
+        st.plotly_chart(fig_hist, width="stretch")
 
-        st.markdown(f"**Python:** `{sys.version}`  \n**OS:** `{platform.platform()}`")
-        st.markdown("**Package versions:**")
-        st.code("\n".join(f"{k:16s} {v}" for k, v in _versions.items()), language="text")
+    with col_donut:
+        fig_donut = go.Figure(go.Pie(
+            labels=["Wholesale", "Balancing", "Held Back"],
+            values=[wholesale_mw, balancing_mw, held_mw],
+            hole=0.55,
+            marker=dict(colors=["#00D4AA", "#FF6B6B", "#4A5568"]),
+        ))
+        fig_donut.update_layout(
+            template=PLOTLY_TEMPLATE,
+            title="Capacity Split (MW)",
+            height=380,
+        )
+        st.plotly_chart(fig_donut, width="stretch")
 
-        st.markdown("**Simulation intermediates:**")
-        _dmw = result.delivered_mw
-        _tmw = result.traded_mw
-        _sip = result.sip_matrix
-        diag_lines = [
-            f"delivered_mw     shape={_dmw.shape}  mean={np.mean(_dmw):.4f}  min={np.min(_dmw):.4f}  max={np.max(_dmw):.4f}",
-            f"traded_mw        shape={_tmw.shape}  sum={np.sum(_tmw):.2f}  mean={np.mean(_tmw):.4f}",
-            f"sip_matrix       shape={_sip.shape}  mean={np.mean(_sip):.2f}  min={np.min(_sip):.2f}  max={np.max(_sip):.2f}",
-            f"daily_pnl        mean={np.mean(result.daily_pnl):.2f}  std={np.std(result.daily_pnl):.2f}",
-            f"daily_revenue    mean={np.mean(result.daily_revenue):.2f}",
-            f"daily_imb_cost   mean={np.mean(result.daily_imbalance_cost):.2f}",
-            f"plugin_rates     mean={np.mean(result.plugin_rates):.6f}  min={np.min(result.plugin_rates):.6f}",
+    # ── Revenue / imbalance breakdown ─────────────────────────────────────────
+    st.subheader("Revenue vs Imbalance Cost")
+    col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+    col_r1.metric("Avg Revenue",          f"£{float(np.mean(rev_dist)):,.0f}")
+    col_r2.metric("Avg Imbalance Cost",   f"£{float(np.mean(imb_dist)):,.0f}")
+    col_r3.metric("Wholesale MW (avg)",   f"{wholesale_mw:.1f}")
+    col_r4.metric("Balancing MW (avg)",   f"{balancing_mw:.1f}")
+
+    # ── Risk metrics table ────────────────────────────────────────────────────
+    with st.expander("Full risk metrics table", expanded=False):
+        risk_rows = [
+            {"Metric": "Expected P&L (£)",            "Value": f"{expected_pnl:,.2f}"},
+            {"Metric": "VaR 95% (£)",                 "Value": f"{var_95:,.2f}"},
+            {"Metric": "Expected Shortfall 95% (£)",  "Value": f"{es_95:,.2f}"},
+            {"Metric": "P&L Std Dev (£)",             "Value": f"{float(np.std(pnl_dist)):,.2f}"},
+            {"Metric": "P&L 5th pct (£)",             "Value": f"{float(np.percentile(pnl_dist,  5)):,.2f}"},
+            {"Metric": "P&L 25th pct (£)",            "Value": f"{float(np.percentile(pnl_dist, 25)):,.2f}"},
+            {"Metric": "P&L 75th pct (£)",            "Value": f"{float(np.percentile(pnl_dist, 75)):,.2f}"},
+            {"Metric": "P&L 95th pct (£)",            "Value": f"{float(np.percentile(pnl_dist, 95)):,.2f}"},
+            {"Metric": "Total Capacity (MW)",         "Value": f"{total_cap_mw:.2f}"},
+            {"Metric": "Wholesale Traded (MW avg)",   "Value": f"{wholesale_mw:.2f}"},
+            {"Metric": "Balancing MW (avg)",          "Value": f"{balancing_mw:.2f}"},
         ]
-        st.code("\n".join(diag_lines), language="text")
+        st.dataframe(pd.DataFrame(risk_rows), width="stretch")

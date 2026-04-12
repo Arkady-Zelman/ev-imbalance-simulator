@@ -12,7 +12,7 @@ _EMPTY_BACKTEST = ([], [])
 
 def _fast_train(sip, mip, demand=None, target="sip", n_combos=3):
     """Call train_xgb_models with minimal combos and mocked backtest."""
-    with patch("src.models.xgb_trainer.run_rolling_backtest", return_value=_EMPTY_BACKTEST):
+    with patch("src.models.rolling_backtest.run_rolling_backtest", return_value=_EMPTY_BACKTEST):
         return __import__("src.models.xgb_trainer", fromlist=["train_xgb_models"]).train_xgb_models(
             sip, mip,
             demand_series=demand,
@@ -113,7 +113,7 @@ class TestGridSearchSingle:
             mip.values.astype(float), demand.values.astype(float),
         )
         combos = _generate_grid_combos()
-        best_p, best_score = _grid_search_single(X, y, combos)
+        best_p, best_score, _train_score, _history = _grid_search_single(X, y, combos)
         assert isinstance(best_p, dict)
         assert best_score >= 0
         assert "n_estimators" in best_p

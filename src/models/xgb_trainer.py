@@ -85,10 +85,13 @@ GRID = {
 # Number of random samples per search mode
 _N_SAMPLES = {"grid": 150, "random": 10}
 
-# Representative horizons (SPs) used during grid search training
-REPRESENTATIVE_HORIZONS = [48, 48 * 3, 48 * 7, 48 * 14]
-# Reduced set for quick random search (2 horizons instead of 4)
-REPRESENTATIVE_HORIZONS_QUICK = [48, 48 * 7]
+# Representative horizons (SPs) used during grid search training.
+# One model per day 1–14 so forecast_forward has an exact-horizon model for
+# every day ahead — eliminates the step-function artifact caused by reusing
+# the closest model across multiple forecast days.
+REPRESENTATIVE_HORIZONS = [48 * d for d in range(1, 15)]      # 14 models
+# Reduced set for quick random search (4 pivot horizons)
+REPRESENTATIVE_HORIZONS_QUICK = [48, 48 * 3, 48 * 7, 48 * 14]
 
 # Rolling window (SPs) for worst-case MAE scoring
 _WORST_WINDOW_SPS = 48 * 3  # 3-day window

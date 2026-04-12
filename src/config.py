@@ -4,8 +4,25 @@ Imbalance Exposure Simulator.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# Backend paths
+# ---------------------------------------------------------------------------
+# Root of the project (two levels up from this file: src/config.py → src/ → root)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+MODEL_DIR = _PROJECT_ROOT / "models"
+PREDICTION_DIR = _PROJECT_ROOT / "data" / "predictions"
+
+# Ensure directories exist when config is imported
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+PREDICTION_DIR.mkdir(parents=True, exist_ok=True)
+
+# Forecast targets
+FORECAST_TARGETS = ["sip", "mip", "demand", "total_generation"]
 
 # ---------------------------------------------------------------------------
 # Fleet & hardware

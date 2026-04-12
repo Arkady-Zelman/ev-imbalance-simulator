@@ -43,7 +43,7 @@ class TestRunRollingBacktest:
         assert isinstance(errors, list)
         assert isinstance(crossovers, list)
         assert len(errors) > 0
-        assert len(crossovers) == 4  # one per lookback (1d, 5d, 15d, 30d)
+        assert len(crossovers) == 4  # one per lookback (1d, 3d, 5d, 15d)
 
     def test_error_fields(self, long_series):
         sip, mip, _ = long_series
@@ -109,5 +109,5 @@ class TestBuildErrorMatrix:
         matrix = build_error_matrix(errors)
         assert isinstance(matrix, pd.DataFrame)
         if not matrix.empty:
-            assert matrix.shape[0] <= 4  # at most 4 lookbacks (1d, 5d, 15d, 30d)
+            assert matrix.shape[0] <= 4  # at most 4 lookbacks (1d, 3d, 5d, 15d)
             assert matrix.shape[1] <= 14  # at most 14 horizons

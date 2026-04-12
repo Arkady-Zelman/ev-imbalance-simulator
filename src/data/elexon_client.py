@@ -411,3 +411,23 @@ def pivot_generation_wide(gen_df: pd.DataFrame) -> Optional[pd.DataFrame]:
     result["net_imports_mw"] = wide[int_cols].sum(axis=1) if int_cols else 0.0
 
     return result[~result.index.duplicated(keep="first")].sort_index()
+
+
+# ── Raw (no Streamlit cache) variants for backend scripts ────────────────────
+# backend/train.py and backend/predict.py call these to avoid the
+# "No runtime found" Streamlit warning when running outside a Streamlit session.
+
+def fetch_system_prices_raw(date_from, date_to) -> "pd.DataFrame":
+    return fetch_system_prices.__wrapped__(date_from, date_to)
+
+
+def fetch_market_index_raw(date_from, date_to) -> "pd.DataFrame":
+    return fetch_market_index.__wrapped__(date_from, date_to)
+
+
+def fetch_demand_outturn_raw(date_from, date_to) -> "pd.DataFrame":
+    return fetch_demand_outturn.__wrapped__(date_from, date_to)
+
+
+def fetch_generation_outturn_raw(date_from, date_to) -> "pd.DataFrame":
+    return fetch_generation_outturn.__wrapped__(date_from, date_to)

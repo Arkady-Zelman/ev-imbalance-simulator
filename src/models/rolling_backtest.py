@@ -1,7 +1,7 @@
 """
 Rolling forecast backtest engine for market inefficiency detection.
 
-Uses 1-day, 15-day, and 30-day lookbacks to forecast 1 through 14 days
+Uses 1-day, 3-day, 5-day, and 15-day lookbacks to forecast 1 through 14 days
 ahead, then compares error against the forward curve (MIP benchmark)
 at each horizon.  The crossover point — where our forecast error
 exceeds the market's — defines the maximum exploitable forecast horizon.
@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Day-level lookbacks (in settlement periods)
 ROLLING_LOOKBACKS = {
-    "1 day": 48,
-    "5 days": 48 * 5,
+    "1 day":   48,
+    "3 days":  48 * 3,
+    "5 days":  48 * 5,
     "15 days": 48 * 15,
-    "30 days": 48 * 30,
 }
 
 # Day-level horizons: 1 to 14 days ahead (in settlement periods)
@@ -77,7 +77,6 @@ def run_rolling_backtest(
     target: str = "sip",
     demand_series: Optional[pd.Series] = None,
     xgb_params: Optional[Dict] = None,
-    np_params: Optional[Dict] = None,
     da_series: Optional[pd.Series] = None,
     gen_series: Optional[pd.Series] = None,
 ) -> Tuple[List[RollingErrorRow], List[CrossoverResult]]:
@@ -93,7 +92,6 @@ def run_rolling_backtest(
     demand_series : Half-hourly demand (feature for SIP/MIP; target for demand).
     gen_series    : Half-hourly total generation (MW). Required for target="total_generation".
     xgb_params    : Optional XGBRegressor kwargs for method="xgb".
-    np_params     : Optional NeuralProphet constructor kwargs for method="neuralprophet".
 
     Returns
     -------
@@ -182,9 +180,6 @@ def run_rolling_backtest(
                             mip_values=mip_values, demand_values=demand_values,
                             xgb_params=xgb_params,
                         )
-                elif method == "neuralprophet":
-                    from src.models.prophet_forecaster import _neuralprophet_forecast
-                    fc = _neuralprophet_forecast(target_values, idx, lb_sps, [h_sps], np_params=np_params)
                 elif method == "ewma":
                     fc = _ewma_forecast(target_values, idx, lb_sps, [h_sps], alpha=ewma_alpha)
                 else:

@@ -40,10 +40,12 @@ desktop.ini
 # Logs
 *.log
 
-# Serialised model/data files (belt-and-braces; also excluded via .cache/)
-*.joblib
-*.pkl
-*.pickle
+# Serialised model/data files — exclude cache copies only.
+# models/*.joblib and data/predictions/*.parquet are committed intentionally
+# so GitHub Actions can push fresh predictions daily without re-training.
+.cache/**/*.joblib
+.cache/**/*.pkl
+.cache/**/*.pickle
 
 # Interview / planning docs (not part of the app)
 ohme_interview_projects.md

@@ -78,7 +78,7 @@ def _model_file(target: str = "sip") -> Path:
 
 LSTM_GRID = {
     "hidden_size": [32, 64, 128],
-    "num_layers":  [1, 2],
+    "num_layers":  [1, 2, 3, 4],
     "dropout":     [0.1, 0.2, 0.3],
     "lr":          [0.001, 0.005, 0.01],
     "batch_size":  [16, 32, 64],
@@ -90,9 +90,12 @@ _LSTM_SEARCH_EPOCHS   = 20    # fast per-combo training during search
 _LSTM_FINAL_EPOCHS    = 50    # full training for winning params
 _LSTM_PATIENCE        = 5     # early stopping patience (validation loss)
 
-# Representative horizons — fewer than XGBoost because LSTM training is slower
-REPRESENTATIVE_HORIZONS       = [48, 336]         # 1d, 7d (in-depth)
-REPRESENTATIVE_HORIZONS_QUICK = [48]              # 1d (quick mode)
+# Representative horizons — 7 pivot days so the step-function is at most 2 days
+# wide instead of 7. LSTM is slower, so we skip every other day but keep all
+# endpoints (1, 2, 4, 7, 10, 12, 14).  forecast_forward still maps each
+# requested day to the closest trained horizon.
+REPRESENTATIVE_HORIZONS       = [48 * d for d in (1, 2, 4, 7, 10, 12, 14)]
+REPRESENTATIVE_HORIZONS_QUICK = [48, 48 * 7]     # 1d, 7d (quick mode)
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -252,6 +255,19 @@ def _eval_loss(
         return float(criterion(model(Xt), yt).item())
 
 
+def _eval_mae(
+    model: "LSTMForecaster",
+    X: np.ndarray,
+    y: np.ndarray,
+    device: "torch.device",
+) -> float:
+    """MAE in original units (£/MWh or MW) — used for hybrid weight computation."""
+    model.eval()
+    with torch.no_grad():
+        preds = model(torch.from_numpy(X).to(device)).cpu().numpy()
+    return float(np.mean(np.abs(preds - y)))
+
+
 def _grid_search_single_lstm(
     X: np.ndarray,
     y: np.ndarray,
@@ -259,8 +275,12 @@ def _grid_search_single_lstm(
     n_epochs: int = _LSTM_SEARCH_EPOCHS,
 ) -> Tuple[dict, float, float, List[tuple]]:
     """
-    Time-series 80/20 split → train each combo → score val Huber loss.
-    Returns (best_params, best_val_loss, best_train_loss, history).
+    Time-series 80/20 split → train each combo → select by val Huber loss,
+    but return val MAE in original units as best_score so it is on the same
+    scale as XGBoost's worst-window MAE for hybrid weight computation.
+
+    Returns (best_params, best_val_mae, best_train_mae, history).
+    history entries store Huber loss for diagnostics (relative ranking only).
     """
     device = _get_device()
     n = len(y)
@@ -271,10 +291,10 @@ def _grid_search_single_lstm(
     X_tr, X_val = X[:split], X[split:]
     y_tr, y_val = y[:split], y[split:]
 
-    criterion = nn.HuberLoss()
-    best_score = float("inf")
+    criterion  = nn.HuberLoss()
+    best_huber = float("inf")   # used only for model selection
     best_params = param_combos[0]
-    best_train  = float("inf")
+    best_model  = None
     history: List[tuple] = []
 
     input_size = X.shape[2]
@@ -298,30 +318,37 @@ def _grid_search_single_lstm(
             )
             loader = DataLoader(ds, batch_size=params["batch_size"], shuffle=False)
 
-            best_val = float("inf")
+            best_val_huber = float("inf")
             patience_ctr = 0
             for _ in range(n_epochs):
                 _train_single_epoch(model, loader, opt, criterion, device)
                 val_loss = _eval_loss(model, X_val, y_val, criterion, device)
-                if val_loss < best_val - 1e-6:
-                    best_val = val_loss
+                if val_loss < best_val_huber - 1e-6:
+                    best_val_huber = val_loss
                     patience_ctr = 0
                 else:
                     patience_ctr += 1
                     if patience_ctr >= _LSTM_PATIENCE:
                         break
 
-            train_loss = _eval_loss(model, X_tr, y_tr, criterion, device)
-            history.append((params, best_val))
-            if best_val < best_score:
-                best_score  = best_val
+            history.append((params, best_val_huber))
+            if best_val_huber < best_huber:
+                best_huber  = best_val_huber
                 best_params = params
-                best_train  = train_loss
+                best_model  = model
         except Exception as exc:
             logger.debug("LSTM combo failed: %s", exc)
             history.append((params, float("inf")))
 
-    return best_params, best_score, best_train, history
+    # Convert winning model's score to MAE in original units for hybrid weighting
+    if best_model is not None:
+        best_val_mae   = _eval_mae(best_model, X_val, y_val, device)
+        best_train_mae = _eval_mae(best_model, X_tr,  y_tr,  device)
+    else:
+        best_val_mae   = float("inf")
+        best_train_mae = float("inf")
+
+    return best_params, best_val_mae, best_train_mae, history
 
 
 def _train_final_model(

@@ -1,0 +1,41 @@
+name: Weekly model retrain
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'   # 02:00 UTC every Sunday
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360    # full retrain can take up to ~90 min; 6h hard cap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train models
+        run: python -m backend.train
+
+      - name: Generate predictions
+        run: python -m backend.predict
+
+      - name: Commit models + predictions
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add models/ data/predictions/
+          git diff --staged --quiet || \
+            git commit -m "chore: weekly retrain $(date -u +%Y-%m-%d) [skip ci]"
+          git push

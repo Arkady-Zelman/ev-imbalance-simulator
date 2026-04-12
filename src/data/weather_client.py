@@ -244,3 +244,18 @@ def fetch_demand_forecast(date_from: dt.date, date_to: dt.date) -> pd.DataFrame:
 
     result = pd.DataFrame(rows).set_index("datetime").sort_index()
     return result[~result.index.duplicated(keep="first")]
+
+
+
+# ── Raw (no Streamlit cache) variants for backend scripts ────────────────────
+
+def fetch_weather_data_raw(date_from, date_to):
+    return fetch_weather_data.__wrapped__(date_from, date_to)
+
+
+def fetch_wind_generation_forecast_raw(date_from, date_to):
+    return fetch_wind_generation_forecast.__wrapped__(date_from, date_to)
+
+
+def fetch_demand_forecast_raw(date_from, date_to):
+    return fetch_demand_forecast.__wrapped__(date_from, date_to)

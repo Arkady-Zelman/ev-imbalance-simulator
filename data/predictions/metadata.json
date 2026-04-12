@@ -1,0 +1,85 @@
+{
+  "generated_at": "2026-04-12T16:49:49.675874Z",
+  "data_range": {
+    "from": "2026-01-12",
+    "to": "2026-04-12"
+  },
+  "targets": {
+    "sip": {
+      "training_timestamp": 1776000333.9205577,
+      "xgb_val_mae": 40.282413482666016,
+      "lstm_val_mae": 17.503976821899414,
+      "hybrid_weights": {
+        "xgb": 0.3029082925866111,
+        "lstm": 0.6970917074133889
+      },
+      "alpha_status": false,
+      "exog_keys": [
+        "temperature_c",
+        "wind_speed_100m",
+        "solar_radiation",
+        "cloud_cover_pct",
+        "wind_fc_mw",
+        "demand_fc_mw"
+      ]
+    },
+    "mip": {
+      "training_timestamp": 1776000913.4594457,
+      "xgb_val_mae": 32.063262939453125,
+      "lstm_val_mae": 9.565241813659668,
+      "hybrid_weights": {
+        "xgb": 0.22977625236333818,
+        "lstm": 0.7702237476366618
+      },
+      "alpha_status": false,
+      "exog_keys": [
+        "temperature_c",
+        "wind_speed_100m",
+        "solar_radiation",
+        "cloud_cover_pct",
+        "wind_fc_mw",
+        "demand_fc_mw"
+      ]
+    },
+    "demand": {
+      "training_timestamp": 1776001738.8017504,
+      "xgb_val_mae": 1490.48486328125,
+      "lstm_val_mae": 18267.576171875,
+      "hybrid_weights": {
+        "xgb": 0.9245632017924647,
+        "lstm": 0.0754367982075354
+      },
+      "alpha_status": true,
+      "exog_keys": [
+        "temperature_c",
+        "wind_speed_100m",
+        "solar_radiation",
+        "cloud_cover_pct",
+        "wind_fc_mw",
+        "demand_fc_mw",
+        "gen_mw"
+      ]
+    },
+    "total_generation": {
+      "training_timestamp": 1776002634.1483533,
+      "xgb_val_mae": 1543.4031982421875,
+      "lstm_val_mae": 19356.98046875,
+      "hybrid_weights": {
+        "xgb": 0.9261543126273002,
+        "lstm": 0.07384568737269988
+      },
+      "alpha_status": true,
+      "exog_keys": [
+        "temperature_c",
+        "wind_speed_100m",
+        "solar_radiation",
+        "cloud_cover_pct",
+        "wind_fc_mw",
+        "demand_fc_mw",
+        "demand_mw"
+      ]
+    }
+  },
+  "fan_origins": 52,
+  "fan_step_days": 7
+}
