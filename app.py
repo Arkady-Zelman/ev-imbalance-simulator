@@ -3,7 +3,7 @@ Ohme Fleet Trading — Main Streamlit Frontend
 ============================================
 
 Once UI scroll layout (Magic Portfolio design system).
-Sections: Market & Allocation | Demand Map | Summary | Sensitivity
+Sections: Market Overview | Capacity Allocation | Demand Map | Summary | Sensitivity
 
 Model training runs offline via:
     python -m backend.train
@@ -24,6 +24,7 @@ import streamlit as st
 
 from src.config import DEFAULT_DA_PRICE, PREDICTION_DIR
 from src.models.sip_models import derive_da_price_from_mip
+from src.predictions import PredictionSchemaError, load_target_predictions
 import src.session_keys as sk
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,11 @@ def _load_parquet(path: Path):
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
+def _load_target_prediction_parquet(target: str):
+    return load_target_predictions(target)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
 def _load_metadata(path: Path) -> dict:
     if path.exists():
         with open(path) as f:
@@ -64,10 +70,17 @@ def _init_predictions() -> None:
     if st.session_state.get(sk.PREDICTIONS_LOADED):
         return
 
-    pred_sip    = _load_parquet(PREDICTION_DIR / "sip_predictions.parquet")
-    pred_mip    = _load_parquet(PREDICTION_DIR / "mip_predictions.parquet")
-    pred_demand = _load_parquet(PREDICTION_DIR / "demand_predictions.parquet")
-    pred_gen    = _load_parquet(PREDICTION_DIR / "gen_predictions.parquet")
+    def _safe_load_prediction(target: str):
+        try:
+            return _load_target_prediction_parquet(target)
+        except PredictionSchemaError as exc:
+            logger.warning("Prediction schema validation failed for %s: %s", target, exc)
+            return None
+
+    pred_sip    = _safe_load_prediction("sip")
+    pred_mip    = _safe_load_prediction("mip")
+    pred_demand = _safe_load_prediction("demand")
+    pred_gen    = _safe_load_prediction("total_generation")
     fan_data    = _load_parquet(PREDICTION_DIR / "backtest_fan.parquet")
     metadata    = _load_metadata(PREDICTION_DIR / "metadata.json")
 
@@ -183,16 +196,12 @@ with st.sidebar:
                                   st.session_state.get(sk.SIM_RISK_PROFILE, "Moderate")
                               ),
                               key=sk.SIM_RISK_PROFILE)
-
-    st.divider()
-    st.caption("MC runs (sensitivity)")
-    _mc_sens  = st.selectbox("Per-scenario runs", [500, 1_000, 2_000],
-                             index=0, key=sk.SIM_MC_RUNS_SENS,
-                             label_visibility="collapsed")
+    _mc_sens  = st.selectbox("Sensitivity runs per scenario", [500, 1_000, 2_000],
+                             index=0, key=sk.SIM_MC_RUNS_SENS)
 
 # ── Scroll-spy nav ─────────────────────────────────────────────────────────────
 
-from src.ui.layout import inject_scrollnav, section_start, section_end
+from src.ui.layout import inject_scrollnav, section_start
 
 inject_scrollnav()
 
@@ -205,36 +214,41 @@ from tabs.tab_executive_summary   import render as render_executive
 from tabs.tab_sensitivity         import render as render_sensitivity
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Section 1 — Market Overview + Capacity Allocation
+# Section 1 — Market Overview
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.markdown(section_start("sec-market", "Market & Allocation"), unsafe_allow_html=True)
-render_main_chart()
-st.markdown("<hr style='border:none;border-top:1px solid var(--border);margin:32px 0 24px;'>",
-            unsafe_allow_html=True)
-render_allocation()
-st.markdown(section_end(), unsafe_allow_html=True)
+with st.container():
+    st.markdown(section_start("sec-market", "Market Overview"), unsafe_allow_html=True)
+    render_main_chart()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Section 2 — Demand Map
+# Section 2 — Capacity Allocation
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.markdown(section_start("sec-demand", "Demand Map"), unsafe_allow_html=True)
-render_demand_map()
-st.markdown(section_end(), unsafe_allow_html=True)
+with st.container():
+    st.markdown(section_start("sec-allocation", "Capacity Allocation"), unsafe_allow_html=True)
+    render_allocation()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Section 3 — Executive Summary
+# Section 3 — Demand Map
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.markdown(section_start("sec-summary", "Summary"), unsafe_allow_html=True)
-render_executive()
-st.markdown(section_end(), unsafe_allow_html=True)
+with st.container():
+    st.markdown(section_start("sec-demand", "Demand Map"), unsafe_allow_html=True)
+    render_demand_map()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Section 4 — Sensitivity & Scenario Analysis
+# Section 4 — Executive Summary
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.markdown(section_start("sec-sens", "Sensitivity"), unsafe_allow_html=True)
-render_sensitivity()
-st.markdown(section_end(), unsafe_allow_html=True)
+with st.container():
+    st.markdown(section_start("sec-summary", "Summary"), unsafe_allow_html=True)
+    render_executive()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 5 — Sensitivity & Scenario Analysis
+# ══════════════════════════════════════════════════════════════════════════════
+
+with st.container():
+    st.markdown(section_start("sec-sens", "Sensitivity"), unsafe_allow_html=True)
+    render_sensitivity()

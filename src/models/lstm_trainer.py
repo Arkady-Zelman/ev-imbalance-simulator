@@ -60,6 +60,10 @@ from src.models.lstm_forecaster import (
     build_lstm_inference_input,
     build_lstm_sequences,
 )
+from src.models.explainability import (
+    average_importance_maps,
+    compute_lstm_integrated_gradients_importance,
+)
 from src.models.rolling_backtest import (
     ROLLING_HORIZONS,
     ROLLING_LOOKBACKS,
@@ -92,8 +96,11 @@ _LSTM_PATIENCE        = 5     # early stopping patience (validation loss)
 
 # Representative horizons — 7 pivot days so the step-function is at most 2 days
 # wide instead of 7. LSTM is slower, so we skip every other day but keep all
-# endpoints (1, 2, 4, 7, 10, 12, 14).  forecast_forward still maps each
+# endpoints (1, 2, 4, 7, 10, 12, 14). forecast_forward still maps each
 # requested day to the closest trained horizon.
+# TODO: Train exact horizons 1..14 for the LSTM path as an optional enhancement.
+# The current closest-horizon mapping can keep the daily-forward product smoother
+# than the XGB component at some horizons.
 REPRESENTATIVE_HORIZONS       = [48 * d for d in (1, 2, 4, 7, 10, 12, 14)]
 REPRESENTATIVE_HORIZONS_QUICK = [48, 48 * 7]     # 1d, 7d (quick mode)
 
@@ -120,6 +127,8 @@ class TrainedLSTMModels:
     train_scores:       Dict[str, Dict[int, float]]        = field(default_factory=dict)
     seq_len:            int                                = 336
     exog_keys:          List[str]                          = field(default_factory=list)
+    channel_names:      List[str]                          = field(default_factory=list)
+    feature_attributions_mean: Dict[str, float]            = field(default_factory=dict)
 
 
 @dataclass
@@ -214,6 +223,30 @@ def _align_to_target(target: pd.Series, exog: pd.Series) -> np.ndarray:
     aligned = exog.reindex(target.index).ffill(limit=4)
     fill_val = float(aligned.mean()) if not pd.isna(aligned.mean()) else 0.0
     return aligned.fillna(fill_val).to_numpy(dtype=np.float32)
+
+
+def _lstm_channel_name_list(
+    target: str,
+    demand_series: Optional[pd.Series],
+    gen_series: Optional[pd.Series],
+    exog_keys: List[str],
+) -> List[str]:
+    names = ["target"]
+    if target == "demand":
+        names.extend(["sip_aux", "mip_aux"])
+    elif target == "mip":
+        names.append("sip_aux")
+        if demand_series is not None:
+            names.append("demand_aux")
+    elif target == "total_generation":
+        if demand_series is not None:
+            names.append("demand_aux")
+    else:
+        names.append("mip_aux")
+        if demand_series is not None:
+            names.append("demand_aux")
+    names.extend(exog_keys)
+    return names
 
 
 # ── Single-cell training (grid search + final model) ─────────────────────────
@@ -438,6 +471,13 @@ def train_lstm_models(
 
     result = TrainedLSTMModels(target=target, training_timestamp=time.time())
     result.exog_keys = list(exog_series.keys()) if exog_series else []
+    result.channel_names = _lstm_channel_name_list(
+        target,
+        demand_series=demand_series,
+        gen_series=gen_series,
+        exog_keys=result.exog_keys,
+    )
+    attribution_maps: List[Dict[str, float]] = []
 
     if selected_lookback and selected_lookback in ROLLING_LOOKBACKS:
         lookbacks = [(selected_lookback, ROLLING_LOOKBACKS[selected_lookback])]
@@ -515,6 +555,13 @@ def train_lstm_models(
             )
             result.model_configs[lb_label][h_sps] = config
             result.seq_len = best_p["seq_len"]
+            attribution_map = compute_lstm_integrated_gradients_importance(
+                final_model,
+                X_final_scaled,
+                result.channel_names,
+            )
+            if attribution_map:
+                attribution_maps.append(attribution_map)
 
     if progress_callback:
         progress_callback(step_idx / total_steps, f"Running LSTM backtest ({target_desc})…")
@@ -524,6 +571,7 @@ def train_lstm_models(
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
+    result.feature_attributions_mean = average_importance_maps(attribution_maps)
 
     if progress_callback:
         progress_callback(1.0, f"LSTM {target_desc} training complete.")

@@ -3,7 +3,8 @@ Tab 5 — UK Demand Map Visualisation
 
 Shows:
   - National demand vs generation (surplus/deficit)
-  - ELEXON NDFD demand forecast vs our hybrid vs actuals
+  - Intraday 48-SP demand shape vs latest actual day
+  - Daily-forward demand view kept separate from half-hourly charts
   - Weather overlay (wind speed, temperature)
 """
 
@@ -18,7 +19,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import src.session_keys as sk
-from src.config import DEFAULT_DA_PRICE
+from src.config import DEFAULT_DA_PRICE, SP_LABELS
+from src.predictions import (
+    PredictionSchemaError,
+    load_forward_daily_predictions,
+    load_intraday_predictions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +64,14 @@ def _build_demand_series(demand_df: Optional[pd.DataFrame]) -> Optional[pd.Serie
             (df["settlementPeriod"].astype(int) - 1) * 30, unit="min"
         )
         col = "initialDemandOutturn" if "initialDemandOutturn" in df.columns else df.columns[-1]
-        return df.set_index("datetime")[col].sort_index()
+        series = df.groupby("datetime")[col].mean().sort_index()
+        duplicate_count = len(df) - len(series)
+        if duplicate_count > 0:
+            logger.warning(
+                "Collapsed %s duplicate demand timestamp rows while building the actual demand series.",
+                duplicate_count,
+            )
+        return series
     except Exception as exc:
         logger.warning("Could not build demand series: %s", exc)
         return None
@@ -114,6 +127,26 @@ def _render_demand_map(demand_mw: float) -> None:
         height=480,
     )
     st.plotly_chart(fig, width="stretch")
+
+
+def _latest_complete_day(series: Optional[pd.Series]) -> tuple[Optional[pd.Timestamp], Optional[pd.Series]]:
+    """Return the latest day with a full 48-settlement-period history."""
+    if series is None or series.empty:
+        return None, None
+
+    aligned = series.groupby(level=0).mean().sort_index()
+    counts = aligned.groupby(aligned.index.normalize()).size()
+    full_days = counts[counts >= 48].index.sort_values()
+    if len(full_days) == 0:
+        return None, None
+
+    day_start = pd.Timestamp(full_days[-1])
+    expected_index = pd.date_range(day_start, periods=48, freq="30min")
+    day_slice = aligned.reindex(expected_index)
+    if day_slice.isna().any():
+        return None, None
+
+    return day_start, day_slice
 
 
 def render() -> None:
@@ -192,39 +225,118 @@ def render() -> None:
         st.info("Demand and generation data not yet loaded. The app will fetch it from ELEXON on startup.")
 
     # ── Demand forecast comparison ────────────────────────────────────────────
-    st.subheader("Demand Forecast: ELEXON vs Our Hybrid vs Actuals")
+    st.subheader("Demand Forecast Views")
 
     if pred_dem is not None and not pred_dem.empty and demand_series is not None:
-        # Forward predictions averaged across lookbacks
-        fwd = pred_dem[pred_dem["prediction_type"] == "forward"].copy()
-        if not fwd.empty:
-            fwd_avg = fwd.groupby("forecast_date")["hybrid_prediction"].mean().reset_index()
-            fwd_avg = fwd_avg.sort_values("forecast_date")
+        try:
+            intraday_48sp = load_intraday_predictions(
+                "demand",
+                pred_dem,
+                context="Demand Map half-hourly demand chart",
+            )
+            forward_daily = load_forward_daily_predictions(
+                "demand",
+                pred_dem,
+                context="Demand Map daily forward chart",
+            )
+        except PredictionSchemaError as exc:
+            logger.warning("%s", exc)
+            st.warning(str(exc))
+            intraday_48sp = pd.DataFrame()
+            forward_daily = pd.DataFrame()
 
-            # Last 30 days of actuals
-            cutoff = demand_series.index.max() - pd.Timedelta(days=30)
-            actuals_last = demand_series.loc[demand_series.index >= cutoff] if len(demand_series) > 0 else demand_series
+        latest_day_start, latest_day_actuals = _latest_complete_day(demand_series)
+
+        if not intraday_48sp.empty:
+            intraday_summary = (
+                intraday_48sp.groupby("settlement_period")["hybrid_prediction"]
+                .agg(mean="mean", p25=lambda x: x.quantile(0.25), p75=lambda x: x.quantile(0.75))
+                .reset_index()
+                .sort_values("settlement_period")
+            )
 
             fig2 = go.Figure()
-            if not actuals_last.empty:
+            if latest_day_start is not None and latest_day_actuals is not None:
                 fig2.add_trace(go.Scatter(
-                    x=actuals_last.index, y=actuals_last.values,
-                    mode="lines", name="Actuals",
+                    x=SP_LABELS,
+                    y=latest_day_actuals.values,
+                    mode="lines",
+                    name=f"Actuals ({latest_day_start.strftime('%Y-%m-%d')})",
                     line=dict(color="#FFE66D", width=1.5),
                 ))
+
             fig2.add_trace(go.Scatter(
-                x=fwd_avg["forecast_date"], y=fwd_avg["hybrid_prediction"],
-                mode="lines", name="Our Hybrid Forecast",
+                x=SP_LABELS + SP_LABELS[::-1],
+                y=list(intraday_summary["p75"]) + list(intraday_summary["p25"])[::-1],
+                fill="toself",
+                fillcolor="rgba(0,212,170,0.12)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="Hybrid intraday P25–P75",
+                hoverinfo="skip",
+            ))
+            fig2.add_trace(go.Scatter(
+                x=SP_LABELS,
+                y=intraday_summary["mean"],
+                mode="lines",
+                name="Hybrid intraday 48-SP forecast",
                 line=dict(color="#00D4AA", dash="dot", width=2),
             ))
             fig2.update_layout(
                 template=PLOTLY_TEMPLATE,
-                title="Demand Forecast (MW)",
-                xaxis_title="Date",
+                title="Tomorrow Demand Shape — Intraday 48-SP Forecast vs Latest Actual Day",
+                xaxis_title="Settlement Period (half-hour)",
                 yaxis_title="MW",
-                height=350,
+                height=360,
+                xaxis=dict(
+                    tickmode="array",
+                    tickvals=SP_LABELS[::4],
+                    ticktext=SP_LABELS[::4],
+                    tickangle=-45,
+                ),
             )
             st.plotly_chart(fig2, width="stretch")
+            st.caption(
+                "This half-hourly demand comparison uses only the intraday 48-SP product. "
+                "Daily-forward rows with settlement_period = 0 are blocked from this chart."
+            )
+
+        if not forward_daily.empty:
+            forward_daily_avg = (
+                forward_daily.groupby("forecast_date")["hybrid_prediction"]
+                .mean()
+                .reset_index()
+                .sort_values("forecast_date")
+            )
+            actual_daily_mean = demand_series.resample("D").mean().dropna().tail(30)
+
+            fig3 = go.Figure()
+            if not actual_daily_mean.empty:
+                fig3.add_trace(go.Scatter(
+                    x=actual_daily_mean.index,
+                    y=actual_daily_mean.values,
+                    mode="lines",
+                    name="Actual daily mean",
+                    line=dict(color="#FFE66D", width=1.5),
+                ))
+            fig3.add_trace(go.Scatter(
+                x=forward_daily_avg["forecast_date"],
+                y=forward_daily_avg["hybrid_prediction"],
+                mode="lines+markers",
+                name="Hybrid daily-forward scalar",
+                line=dict(color="#00D4AA", dash="dot", width=2),
+            ))
+            fig3.update_layout(
+                template=PLOTLY_TEMPLATE,
+                title="Daily Forward Demand View",
+                xaxis_title="Date",
+                yaxis_title="MW",
+                height=320,
+            )
+            st.plotly_chart(fig3, width="stretch")
+            st.caption(
+                "This chart shows the daily-forward product separately. It remains a one-value-per-day "
+                "view and is not treated as a native half-hourly demand curve."
+            )
     else:
         st.info("No demand predictions available. Run `python -m backend.predict` to generate.")
 

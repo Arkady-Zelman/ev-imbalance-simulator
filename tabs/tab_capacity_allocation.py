@@ -30,6 +30,7 @@ from src.config import (
     DEFAULT_OVERRIDE_RATE,
     SP_LABELS,
 )
+from src.predictions import PredictionSchemaError, load_intraday_predictions
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,13 @@ def _get_intraday_predictions(
     sip_fc = np.full(48, 80.0)
     mip_fc = np.full(48, DEFAULT_DA_PRICE)
 
-    if pred_sip is not None and not pred_sip.empty:
-        intra = pred_sip[pred_sip["prediction_type"] == "intraday"]
-        if not intra.empty:
-            # Average across lookbacks for representative intraday estimate
+    try:
+        if pred_sip is not None and not pred_sip.empty:
+            intra = load_intraday_predictions(
+                "sip",
+                pred_sip,
+                context="Capacity Allocation SIP intraday input",
+            )
             sip_avg = (
                 intra.groupby("settlement_period")["hybrid_prediction"]
                 .mean()
@@ -67,10 +71,16 @@ def _get_intraday_predictions(
             )
             if len(sip_avg) == 48:
                 sip_fc = sip_avg.values.astype(float)
+    except PredictionSchemaError as exc:
+        logger.warning("%s", exc)
 
-    if pred_mip is not None and not pred_mip.empty:
-        intra = pred_mip[pred_mip["prediction_type"] == "intraday"]
-        if not intra.empty:
+    try:
+        if pred_mip is not None and not pred_mip.empty:
+            intra = load_intraday_predictions(
+                "mip",
+                pred_mip,
+                context="Capacity Allocation MIP intraday input",
+            )
             mip_avg = (
                 intra.groupby("settlement_period")["hybrid_prediction"]
                 .mean()
@@ -78,6 +88,8 @@ def _get_intraday_predictions(
             )
             if len(mip_avg) == 48:
                 mip_fc = mip_avg.values.astype(float)
+    except PredictionSchemaError as exc:
+        logger.warning("%s", exc)
 
     return sip_fc, mip_fc
 

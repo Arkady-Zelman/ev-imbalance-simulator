@@ -47,10 +47,16 @@ from src.data.weather_client import (
     fetch_wind_generation_forecast_raw as fetch_wind_generation_forecast,
 )
 from src.models.forecaster import build_aligned_series
+from src.models.calendar_features import build_calendar_exog_series
 from src.models.lstm_trainer import (
     TrainedLSTMModels,
     forecast_forward as lstm_forecast_forward,
     forecast_intraday_48sp as lstm_intraday,
+)
+from src.predictions import (
+    PREDICTION_TYPE_FORWARD_DAILY,
+    PREDICTION_TYPE_INTRADAY_48SP,
+    validate_prediction_products,
 )
 from src.models.rolling_backtest import ROLLING_LOOKBACKS, run_rolling_backtest
 from src.models.xgb_trainer import (
@@ -126,6 +132,9 @@ def _build_exog_arrays(data: dict, artifact: dict) -> Dict[str, np.ndarray]:
     wind_fc_df   = data.get("wind_fc_df",   pd.DataFrame())
     demand_fc_df = data.get("demand_fc_df", pd.DataFrame())
 
+    if sip_series is not None and not sip_series.empty:
+        exog_sources.update(build_calendar_exog_series(sip_series.index))
+
     for col in ("temperature_c", "wind_speed_100m", "solar_radiation", "cloud_cover_pct"):
         if not weather_df.empty and col in weather_df.columns:
             exog_sources[col] = weather_df[col]
@@ -160,9 +169,10 @@ def generate_forward_predictions(
     data: dict,
 ) -> pd.DataFrame:
     """
-    Generate 14-day forward hybrid predictions for each lookback.
+    Generate one daily-horizon scalar forecast per future day and lookback.
 
-    Returns DataFrame matching the prediction parquet schema.
+    These rows are deliberately marked with ``settlement_period = 0`` because
+    they are not a true 48-settlement-period intraday curve.
     """
     xgb_trained: TrainedXGBModels = artifact["xgb"]
     lstm_trained: TrainedLSTMModels = artifact["lstm"]
@@ -200,17 +210,21 @@ def generate_forward_predictions(
             forecast_date = today + dt.timedelta(days=day)
             rows.append({
                 "forecast_date":      pd.Timestamp(forecast_date),
-                "settlement_period":  0,      # daily aggregate (0 = all SPs)
+                "settlement_period":  0,      # daily-forward scalar product
                 "target":             target,
                 "lookback":           lb_label,
                 "horizon_days":       day,
                 "hybrid_prediction":  hybrid,
                 "xgb_prediction":     xgb_val if xgb_val is not None else np.nan,
                 "lstm_prediction":    lstm_val if lstm_val is not None else np.nan,
-                "prediction_type":    "forward",
+                "prediction_type":    PREDICTION_TYPE_FORWARD_DAILY,
             })
 
-    return pd.DataFrame(rows)
+    return validate_prediction_products(
+        pd.DataFrame(rows),
+        target=target,
+        context=f"{target} forward-daily generation",
+    )
 
 
 # ── Intraday 48-SP predictions ────────────────────────────────────────────────
@@ -284,11 +298,15 @@ def generate_intraday_48sp(
                 "hybrid_prediction":  hybrid,
                 "xgb_prediction":     xgb_val if xgb_val is not None else np.nan,
                 "lstm_prediction":    lstm_val if lstm_val is not None else np.nan,
-                "prediction_type":    "intraday",
+                "prediction_type":    PREDICTION_TYPE_INTRADAY_48SP,
                 "is_best_lookback":   is_best,
             })
 
-    return pd.DataFrame(rows)
+    return validate_prediction_products(
+        pd.DataFrame(rows),
+        target=target,
+        context=f"{target} intraday-48sp generation",
+    )
 
 
 # ── Retrospective fan data ────────────────────────────────────────────────────
@@ -459,17 +477,17 @@ def main() -> None:
         artifact = artifacts[target]
         logger.info("\n--- Generating predictions for: %s ---", target)
 
-        # Forward 14-day predictions
+        # Daily forward scalar predictions (one row per future day)
         fwd_df = generate_forward_predictions(target, artifact, data)
         if not fwd_df.empty:
             all_prediction_dfs[target].append(fwd_df)
-            logger.info("  Forward predictions: %d rows", len(fwd_df))
+            logger.info("  Forward daily predictions: %d rows", len(fwd_df))
 
-        # Intraday 48-SP predictions
+        # True intraday 48-SP predictions
         intra_df = generate_intraday_48sp(target, artifact, data)
         if not intra_df.empty:
             all_prediction_dfs[target].append(intra_df)
-            logger.info("  Intraday predictions: %d rows", len(intra_df))
+            logger.info("  Intraday 48-SP predictions: %d rows", len(intra_df))
 
         metadata["targets"][target] = {
             "training_timestamp":      artifact.get("training_timestamp", 0.0),
@@ -480,6 +498,13 @@ def main() -> None:
             "exog_keys":               artifact.get("exog_keys", []),
             "best_intraday_lookback":  artifact.get("best_intraday_lookback"),
             "intraday_weights":        artifact.get("intraday_weights", {}),
+            "xgb_feature_importance":  artifact.get("xgb_feature_importance") or {},
+            "xgb_feature_importance_intraday": artifact.get("xgb_feature_importance_intraday") or {},
+            "xgb_shap_importance": artifact.get("xgb_shap_importance") or {},
+            "xgb_shap_importance_intraday": artifact.get("xgb_shap_importance_intraday") or {},
+            "lstm_feature_attribution": artifact.get("lstm_feature_attribution") or {},
+            "lstm_feature_attribution_intraday": artifact.get("lstm_feature_attribution_intraday") or {},
+            "lstm_channel_names": artifact.get("lstm_channel_names") or [],
         }
 
     # Save per-target prediction parquets
@@ -493,7 +518,11 @@ def main() -> None:
         if not parts:
             logger.warning("No predictions generated for %s — skipping parquet.", target)
             continue
-        combined = pd.concat(parts, ignore_index=True)
+        combined = validate_prediction_products(
+            pd.concat(parts, ignore_index=True),
+            target=target,
+            context=f"{target} parquet output",
+        )
         out_path = PREDICTION_DIR / target_file_map[target]
         combined.to_parquet(out_path, index=False)
         logger.info("Saved %s (%d rows, %.1f KB)", out_path.name, len(combined), out_path.stat().st_size / 1e3)

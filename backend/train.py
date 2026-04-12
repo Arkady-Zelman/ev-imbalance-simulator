@@ -49,6 +49,11 @@ from src.data.weather_client import (
 from src.models.forecaster import build_aligned_series
 from src.models.hybrid_forecaster import _compute_weights
 from src.models.intraday_eval import eval_lookback_intraday, select_best_lookback
+from src.models.calendar_features import build_calendar_exog_series
+from src.models.explainability import (
+    compute_lstm_integrated_gradients_importance,
+    compute_xgb_native_shap_importance,
+)
 from src.models.lstm_trainer import TrainedLSTMModels, train_lstm_models
 from src.models.rolling_backtest import run_rolling_backtest
 from src.models.xgb_trainer import TrainedXGBModels, train_xgb_models
@@ -173,12 +178,20 @@ def build_exog_series(data: dict) -> Dict[str, pd.Series]:
     """
     Build the dict of exogenous Series used for all 4 model targets.
 
+    Calendar columns:
+        calendar_tod_sin, calendar_tod_cos,
+        calendar_dow_sin, calendar_dow_cos,
+        calendar_month_sin, calendar_month_cos
     Weather columns (from Open-Meteo):
         temperature_c, wind_speed_100m, solar_radiation, cloud_cover_pct
     ELEXON forecasts:
         wind_fc_mw, demand_fc_mw
     """
     exog: Dict[str, pd.Series] = {}
+    sip_series = data.get("sip_series")
+
+    if sip_series is not None and not sip_series.empty:
+        exog.update(build_calendar_exog_series(sip_series.index))
 
     weather_df   = data.get("weather_df",   pd.DataFrame())
     wind_fc_df   = data.get("wind_fc_df",   pd.DataFrame())
@@ -277,6 +290,10 @@ def train_single_target(
         "hybrid_weights":     {"xgb": w_xgb, "lstm": w_lstm},
         "xgb_val_mae":        xgb_val_mae,
         "lstm_val_mae":       lstm_val_mae,
+        "xgb_feature_importance": getattr(xgb_trained, "feature_importances_mean", {}) or {},
+        "xgb_shap_importance": getattr(xgb_trained, "shap_importances_mean", {}) or {},
+        "lstm_feature_attribution": getattr(lstm_trained, "feature_attributions_mean", {}) or {},
+        "lstm_channel_names": getattr(lstm_trained, "channel_names", []) or [],
         "training_timestamp": time.time(),
         "hpo_summary":        {
             "xgb_search_mode":  param_search_mode,
@@ -359,6 +376,75 @@ def evaluate_intraday(
     artifact["best_intraday_lookback"] = best_lb
     artifact["intraday_weights"]       = {"xgb": w_xgb_intra, "lstm": w_lstm_intra}
     artifact["intraday_scores"]        = scores
+
+    # XGB importances for the h=48 SP model at the chosen intraday lookback (most relevant for flat intraday curves)
+    from src.models.xgb_forecaster import xgb_feature_name_list
+    x_names = list(getattr(xgb_trained, "feature_names", []) or []) or xgb_feature_name_list(
+        artifact.get("exog_keys") or []
+    )
+    m48 = xgb_trained.final_models.get(best_lb, {}).get(48)
+    if m48 is not None and x_names:
+        fi = getattr(m48, "feature_importances_", None)
+        if fi is not None:
+            arr = np.asarray(fi, dtype=float).ravel()
+            if arr.shape[0] == len(x_names):
+                s = float(arr.sum())
+                if s > 0:
+                    arr = arr / s
+                artifact["xgb_feature_importance_intraday"] = {
+                    x_names[i]: float(arr[i]) for i in range(len(x_names))
+                }
+
+    sip_v = sip_series.values.astype(np.float32)
+    mip_v = mip_series.values.astype(np.float32)
+    demand_v = demand_series.values.astype(np.float32) if demand_series is not None else None
+    gen_v = gen_series.values.astype(np.float32) if gen_series is not None else None
+
+    try:
+        from src.models.xgb_trainer import _build_train_data as xgb_build_train_data
+        from src.models.xgb_trainer import _route_series as xgb_route_series
+
+        xgb_target, xgb_mip, xgb_aux = xgb_route_series(target, sip_v, mip_v, demand_v, gen_v)
+        X_intra, _, _ = xgb_build_train_data(xgb_target, ROLLING_LOOKBACKS[best_lb], 48, xgb_mip, xgb_aux, exog_dict_np)
+        if X_intra is not None and m48 is not None:
+            artifact["xgb_shap_importance_intraday"] = compute_xgb_native_shap_importance(
+                m48,
+                X_intra,
+                x_names,
+            )
+    except Exception as exc:
+        logger.debug("Could not compute XGB intraday SHAP summary for %s: %s", target, exc)
+
+    try:
+        from src.models.lstm_trainer import _route_series as lstm_route_series
+        from src.models.lstm_trainer import _rebuild_model as rebuild_lstm_model
+        from src.models.lstm_forecaster import build_lstm_sequences
+
+        lstm_target, lstm_aux_channels = lstm_route_series(target, sip_v, mip_v, demand_v, gen_v)
+        lstm_exog_arrays = list(exog_dict_np.values()) if exog_dict_np else []
+        X_lstm, _ = build_lstm_sequences(
+            lstm_target,
+            origin_idx=len(lstm_target),
+            lookback_sps=ROLLING_LOOKBACKS[best_lb],
+            horizon_sps=48,
+            seq_len=lstm_trained.seq_len,
+            aux_channels=lstm_aux_channels + lstm_exog_arrays,
+        )
+        if X_lstm is not None:
+            state_np = lstm_trained.final_state_dicts.get(best_lb, {}).get(48)
+            config = lstm_trained.model_configs.get(best_lb, {}).get(48)
+            scaler = lstm_trained.scalers.get(best_lb, {}).get(48)
+            if state_np is not None and config is not None:
+                from src.models.lstm_trainer import _apply_scaler
+                X_lstm_scaled = _apply_scaler(X_lstm, scaler)
+                lstm_model = rebuild_lstm_model(config, state_np)
+                artifact["lstm_feature_attribution_intraday"] = compute_lstm_integrated_gradients_importance(
+                    lstm_model,
+                    X_lstm_scaled,
+                    getattr(lstm_trained, "channel_names", []),
+                )
+    except Exception as exc:
+        logger.debug("Could not compute LSTM intraday attribution summary for %s: %s", target, exc)
 
     return artifact
 

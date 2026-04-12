@@ -10,7 +10,7 @@ try:
 except ImportError:
     HAS_XGB = False
 
-from src.models.xgb_forecaster import _build_features, _xgb_forecast
+from src.models.xgb_forecaster import _build_features, _xgb_forecast, xgb_feature_name_list
 
 
 def _make_sip(n_sps: int = 48 * 60, seed: int = 42) -> np.ndarray:
@@ -38,6 +38,18 @@ class TestBuildFeatures:
         feat = _build_features(sip, idx=10, horizon=48)
         assert feat is not None
         assert np.isnan(feat).any()
+
+    def test_feature_names_match_vector_length(self):
+        """xgb_feature_name_list must match _build_features column count."""
+        sip = _make_sip()
+        mip = _make_sip(seed=1)
+        dem = _make_sip(seed=2)
+        exog = {"w": np.random.randn(len(sip)).astype(np.float32)}
+        idx = 500
+        feat = _build_features(sip, idx=idx, horizon=48, mip_values=mip, aux_values=dem, exog_dict=exog)
+        assert feat is not None
+        names = xgb_feature_name_list(["w"])
+        assert len(feat) == len(names)
 
 
 @pytest.mark.skipif(not HAS_XGB, reason="xgboost not installed")

@@ -13,7 +13,7 @@ be dispatched interchangeably from the rolling backtest engine.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -164,12 +164,45 @@ def _build_features(
     # Additional exogenous series — 3 features each: 1d lag, 7d lag, 24h rolling mean
     if exog_dict:
         for _arr in exog_dict.values():
+            feats.append(_arr[idx] if idx < len(_arr) else np.nan)
             feats.append(_arr[idx - 48]  if idx >= 48  else np.nan)
             feats.append(_arr[idx - 336] if idx >= 336 else np.nan)
             _w = _arr[max(0, idx - 48):idx]
             feats.append(float(np.nanmean(_w)) if len(_w) > 0 else np.nan)
 
     return np.array(feats, dtype=np.float32)
+
+
+def xgb_feature_name_list(exog_keys: Optional[Sequence[str]] = None) -> List[str]:
+    """
+    Human-readable names for each column produced by _build_features, in order.
+
+    Layout must stay in sync with _build_features (base + 2 MIP slots + 4 aux slots
+    + 3 per exogenous series). Use the same exog key order as training (``exog_dict``).
+    """
+    keys = list(exog_keys) if exog_keys else []
+    names: List[str] = [
+        "sp_sin", "sp_cos", "dow_sin", "dow_cos", "h_sin", "h_cos", "tsp_sin", "tsp_cos",
+        "lag_1d", "lag_2d", "lag_7d", "lag_14d", "lag_28d",
+        "roll48_mean", "roll48_std", "roll48_max", "roll48_min",
+        "roll336_mean", "roll336_std",
+        "roll672_mean",
+        "slope_48",
+        "is_weekend",
+        "ema_7d",
+        "lag_ratio_1d_7d",
+        "momentum_1d_minus_2d",
+        "mip_lag1", "mip_roll48_mean",
+        "aux_lag48", "aux_lag96", "aux_roll48_mean", "aux_cross_lag48",
+    ]
+    for k in keys:
+        names.extend([f"{k}_current", f"{k}_lag48", f"{k}_lag336", f"{k}_roll48_mean"])
+    return names
+
+
+def xgb_feature_dim(exog_keys: Optional[Sequence[str]] = None) -> int:
+    """Number of features for the given exogenous keys (matches _build_features)."""
+    return len(xgb_feature_name_list(exog_keys))
 
 
 # ── Default params (used when no tuned params are available) ──────────────────

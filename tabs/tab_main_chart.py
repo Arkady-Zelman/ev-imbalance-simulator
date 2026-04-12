@@ -3,12 +3,12 @@ Tab 1 — Main Page/Chart
 
 Two display modes toggled by a radio button:
 
-14-day Forward
-  Historical time series + fan chart overlays.
+14-day Daily Forward
+  Historical time series + daily-forward overlays.
   Today's forward forecast auto-shown on load.
   Clicking a row in the origins table (or a chart point) zooms to that origin.
 
-Intraday (Tomorrow, 48 SP)
+Intraday 48-SP (Tomorrow)
   Half-hourly profile for tomorrow across all lookbacks.
   Best lookback (lowest CRPS) highlighted; P25–P75 band shown across lookbacks.
   Sub-model breakdown: XGB vs LSTM vs Hybrid.
@@ -26,6 +26,11 @@ import streamlit as st
 
 import src.session_keys as sk
 from src.config import SP_LABELS
+from src.predictions import (
+    PredictionSchemaError,
+    load_forward_daily_predictions,
+    load_intraday_predictions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +127,9 @@ def _build_fan_traces(
     return traces
 
 
-def _build_today_forecast_traces(pred_df: pd.DataFrame) -> list:
+def _build_today_forecast_traces(pred_df: pd.DataFrame, target: str) -> list:
     """
-    14-day forward traces with intraday waveform overlay.
+    Daily-forward traces with an intraday 48-SP shape overlay.
 
     Strategy:
       1. Average across lookbacks to get one daily scalar per horizon day.
@@ -133,17 +138,25 @@ def _build_today_forecast_traces(pred_df: pd.DataFrame) -> list:
       3. Scale each day's scalar by the shape → full half-hourly waveform.
       4. If no intraday predictions exist, fall back to the daily-point trace.
     """
-    fwd   = pred_df[pred_df["prediction_type"] == "forward"].copy()
-    intra = pred_df[pred_df["prediction_type"] == "intraday"].copy()
+    forward_daily = load_forward_daily_predictions(
+        target,
+        pred_df,
+        context=f"Market Overview daily-forward chart ({target})",
+    )
+    intraday_48sp = load_intraday_predictions(
+        target,
+        pred_df,
+        context=f"Market Overview intraday shape overlay ({target})",
+    )
 
-    if fwd.empty:
+    if forward_daily.empty:
         return []
 
     today = pd.Timestamp.today().normalize()
 
     # ── Daily scalar predictions (mean across lookbacks per horizon day) ───────
     daily = (
-        fwd.groupby("horizon_days")["hybrid_prediction"]
+        forward_daily.groupby("horizon_days")["hybrid_prediction"]
         .agg(mean="mean", p25=lambda x: x.quantile(0.25), p75=lambda x: x.quantile(0.75))
         .reset_index()
         .sort_values("horizon_days")
@@ -151,9 +164,9 @@ def _build_today_forecast_traces(pred_df: pd.DataFrame) -> list:
 
     # ── Intraday shape (48-element multiplier) ─────────────────────────────────
     intraday_shape: Optional[np.ndarray] = None
-    if not intra.empty:
+    if not intraday_48sp.empty:
         sp_mean = (
-            intra.groupby("settlement_period")["hybrid_prediction"]
+            intraday_48sp.groupby("settlement_period")["hybrid_prediction"]
             .mean()
             .sort_index()
         )
@@ -187,7 +200,7 @@ def _build_today_forecast_traces(pred_df: pd.DataFrame) -> list:
         ))
         traces.append(go.Scatter(
             x=x_wave, y=y_mean,
-            mode="lines", name="Our Forecast (Today)",
+            mode="lines", name="Daily forward (shaped by intraday 48-SP)",
             line=dict(color=_COLOURS["forecast"], width=1.8, dash="dot"),
         ))
 
@@ -203,7 +216,7 @@ def _build_today_forecast_traces(pred_df: pd.DataFrame) -> list:
         ))
         traces.append(go.Scatter(
             x=x_dates, y=daily["mean"].tolist(),
-            mode="lines", name="Our Forecast (Today)",
+            mode="lines", name="Daily forward scalar",
             line=dict(color=_COLOURS["forecast"], width=2, dash="dot"),
         ))
 
@@ -215,6 +228,7 @@ def _build_today_forecast_traces(pred_df: pd.DataFrame) -> list:
 def _build_past_intraday_fans(
     hist_series: pd.Series,
     pred_df: pd.DataFrame,
+    target: str,
     n_days: int = 7,
 ) -> list:
     """
@@ -227,7 +241,11 @@ def _build_past_intraday_fans(
 
     Returns a list of Plotly traces (one band + one centre line per day).
     """
-    intra = pred_df[pred_df["prediction_type"] == "intraday"].copy()
+    intra = load_intraday_predictions(
+        target,
+        pred_df,
+        context=f"Market Overview past intraday fans ({target})",
+    )
     if intra.empty or hist_series is None or hist_series.empty:
         return []
 
@@ -310,13 +328,17 @@ def _build_past_intraday_fans(
 
 # ── Intraday 48-SP helpers ─────────────────────────────────────────────────────
 
-def _build_intraday_traces(pred_df: pd.DataFrame) -> tuple[go.Figure, pd.DataFrame]:
+def _build_intraday_traces(pred_df: pd.DataFrame, target: str) -> tuple[go.Figure, pd.DataFrame]:
     """
     Build intraday figure and a per-lookback summary table.
 
     Returns (fig, summary_df).
     """
-    intra = pred_df[pred_df["prediction_type"] == "intraday"].copy()
+    intra = load_intraday_predictions(
+        target,
+        pred_df,
+        context=f"Market Overview intraday chart ({target})",
+    )
     fig = go.Figure()
 
     if intra.empty:
@@ -420,6 +442,56 @@ def _build_intraday_traces(pred_df: pd.DataFrame) -> tuple[go.Figure, pd.DataFra
     return fig, summary_df
 
 
+def _xgb_importance_figure(fi_dict: dict, title: str) -> Optional[go.Figure]:
+    """Horizontal bar chart of top-N XGB gain importances (normalised)."""
+    if not fi_dict:
+        return None
+    top_n = 20
+    items = sorted(fi_dict.items(), key=lambda x: -x[1])[:top_n]
+    labels = [k for k, _ in items][::-1]
+    vals = [v for _, v in items][::-1]
+    fig = go.Figure(
+        go.Bar(
+            x=vals, y=labels, orientation="h",
+            marker_color="#4ECDC4",
+        )
+    )
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        height=max(280, 18 * len(labels)),
+        title=title,
+        margin=dict(l=140, r=16, t=36, b=28),
+        xaxis_title="Relative importance (gain, normalised)",
+        showlegend=False,
+    )
+    return fig
+
+
+def _importance_bar_figure(fi_dict: dict, title: str, colour: str, xaxis_title: str) -> Optional[go.Figure]:
+    """Horizontal bar chart for SHAP / attribution summaries."""
+    if not fi_dict:
+        return None
+    top_n = 20
+    items = sorted(fi_dict.items(), key=lambda x: -x[1])[:top_n]
+    labels = [k for k, _ in items][::-1]
+    vals = [v for _, v in items][::-1]
+    fig = go.Figure(
+        go.Bar(
+            x=vals, y=labels, orientation="h",
+            marker_color=colour,
+        )
+    )
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE,
+        height=max(280, 18 * len(labels)),
+        title=title,
+        margin=dict(l=170, r=16, t=36, b=28),
+        xaxis_title=xaxis_title,
+        showlegend=False,
+    )
+    return fig
+
+
 # ── Main render ────────────────────────────────────────────────────────────────
 
 def render() -> None:
@@ -439,10 +511,107 @@ def render() -> None:
     with col_mode:
         mode = st.radio(
             "Forecast mode",
-            options=["14-day Forward", "Intraday (Tomorrow)"],
+            options=["14-day Daily Forward", "Intraday 48-SP (Tomorrow)"],
             horizontal=True,
             key=sk.FORECAST_MODE,
         )
+
+    meta_all = st.session_state.get(sk.METADATA) or {}
+    tmeta = meta_all.get("targets", {}).get(target, {})
+    fi_mean = tmeta.get("xgb_feature_importance") or {}
+    fi_intra = tmeta.get("xgb_feature_importance_intraday") or {}
+    if fi_mean or fi_intra:
+        with st.expander(
+            "XGBoost feature importance (gain) — diagnosing flat or smooth forecasts",
+            expanded=False,
+        ):
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                fig_m = _xgb_importance_figure(fi_mean, "Mean across horizon models")
+                if fig_m:
+                    st.plotly_chart(fig_m, width="stretch")
+                else:
+                    st.caption("No aggregate importance in metadata — re-run training + predict.")
+            with fc2:
+                fig_i = _xgb_importance_figure(
+                    fi_intra,
+                    "1-day horizon (48 SPs), best intraday lookback",
+                )
+                if fig_i:
+                    st.plotly_chart(fig_i, width="stretch")
+                else:
+                    st.caption("Intraday slice not available until you retrain with an updated pipeline.")
+            st.caption(
+                "If cyclical encodings (sp_sin, h_sin) and short lags dominate, the XGB path "
+                "tracks a smooth daily shape; weak exogenous weights suggest little signal from weather or cross-series features."
+            )
+
+    xgb_shap_mean = tmeta.get("xgb_shap_importance") or {}
+    xgb_shap_intra = tmeta.get("xgb_shap_importance_intraday") or {}
+    lstm_attr_mean = tmeta.get("lstm_feature_attribution") or {}
+    lstm_attr_intra = tmeta.get("lstm_feature_attribution_intraday") or {}
+    if xgb_shap_mean or xgb_shap_intra or lstm_attr_mean or lstm_attr_intra:
+        with st.expander(
+            "SHAP and LSTM attribution diagnostics",
+            expanded=False,
+        ):
+            st.caption(
+                "XGBoost uses mean absolute SHAP-style contributions from the fitted trees. "
+                "LSTM uses integrated-gradients channel attribution aggregated across sequence time steps."
+            )
+            row1_col1, row1_col2 = st.columns(2)
+            with row1_col1:
+                fig_sm = _importance_bar_figure(
+                    xgb_shap_mean,
+                    "XGBoost SHAP summary — mean across horizon models",
+                    colour="#00D4AA",
+                    xaxis_title="Mean |SHAP contribution| (normalised)",
+                )
+                if fig_sm:
+                    st.plotly_chart(fig_sm, width="stretch")
+                else:
+                    st.caption("No aggregate XGBoost SHAP summary in metadata yet.")
+            with row1_col2:
+                fig_si = _importance_bar_figure(
+                    xgb_shap_intra,
+                    "XGBoost SHAP summary — 1-day horizon, best intraday lookback",
+                    colour="#4ECDC4",
+                    xaxis_title="Mean |SHAP contribution| (normalised)",
+                )
+                if fig_si:
+                    st.plotly_chart(fig_si, width="stretch")
+                else:
+                    st.caption("No intraday XGBoost SHAP summary in metadata yet.")
+
+            row2_col1, row2_col2 = st.columns(2)
+            with row2_col1:
+                fig_lm = _importance_bar_figure(
+                    lstm_attr_mean,
+                    "LSTM attribution — mean across horizon models",
+                    colour="#A29BFE",
+                    xaxis_title="Integrated-gradients attribution (normalised)",
+                )
+                if fig_lm:
+                    st.plotly_chart(fig_lm, width="stretch")
+                else:
+                    st.caption("No aggregate LSTM attribution in metadata yet.")
+            with row2_col2:
+                fig_li = _importance_bar_figure(
+                    lstm_attr_intra,
+                    "LSTM attribution — 1-day horizon, best intraday lookback",
+                    colour="#B8A4FF",
+                    xaxis_title="Integrated-gradients attribution (normalised)",
+                )
+                if fig_li:
+                    st.plotly_chart(fig_li, width="stretch")
+                else:
+                    st.caption("No intraday LSTM attribution in metadata yet.")
+
+            st.caption(
+                "Calendar channels are prefixed with `calendar_`. If those rise in the rankings, the model is leaning "
+                "more on time structure; if weather or cross-series channels rise, the forecast is reacting more to "
+                "exogenous conditions."
+            )
 
     if not predictions_loaded:
         st.info(
@@ -491,7 +660,7 @@ def render() -> None:
     # ══════════════════════════════════════════════════════════════════════════
     # INTRADAY MODE
     # ══════════════════════════════════════════════════════════════════════════
-    if mode == "Intraday (Tomorrow)":
+    if mode == "Intraday 48-SP (Tomorrow)":
         if pred_df is None or pred_df.empty:
             st.warning("No predictions loaded. Run `python -m backend.predict` first.")
             return
@@ -505,7 +674,12 @@ def render() -> None:
             show_lstm = st.checkbox("Show LSTM", value=False, key="fan_ctrl_lstm")
             n_past    = st.selectbox("Past days", [0, 1, 2, 3, 7], index=2, key="fan_ctrl_past")
 
-        fig, summary_df = _build_intraday_traces(pred_df)
+        try:
+            fig, summary_df = _build_intraday_traces(pred_df, target)
+        except PredictionSchemaError as exc:
+            st.warning(str(exc))
+            logger.warning("%s", exc)
+            return
 
         # ── Overlay past N days of actual half-hourly data ─────────────────
         if n_past > 0 and hist_series is not None and not hist_series.empty:
@@ -578,7 +752,7 @@ def render() -> None:
         return
 
     # ══════════════════════════════════════════════════════════════════════════
-    # 14-DAY FORWARD MODE
+    # 14-DAY DAILY-FORWARD MODE
     # ══════════════════════════════════════════════════════════════════════════
 
     # Auto-select today's forecast on first load
@@ -606,12 +780,14 @@ def render() -> None:
         zoom_end   = origin_ts + pd.Timedelta(days=16)
 
         if pred_df is not None and not pred_df.empty:
-            # Past-7-day intraday fans (behind the actuals)
-            for trace in _build_past_intraday_fans(hist_series, pred_df, n_days=7):
-                fig.add_trace(trace)
-            # Forward 14-day waveform
-            for trace in _build_today_forecast_traces(pred_df):
-                fig.add_trace(trace)
+            try:
+                for trace in _build_past_intraday_fans(hist_series, pred_df, target, n_days=7):
+                    fig.add_trace(trace)
+                for trace in _build_today_forecast_traces(pred_df, target):
+                    fig.add_trace(trace)
+            except PredictionSchemaError as exc:
+                st.warning(str(exc))
+                logger.warning("%s", exc)
 
     elif selected_origin is not None:
         origin_ts  = pd.Timestamp(selected_origin)

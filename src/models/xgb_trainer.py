@@ -52,7 +52,11 @@ from src.models.rolling_backtest import (
     CrossoverResult,
     RollingErrorRow,
 )
-from src.models.xgb_forecaster import _build_features, _fill_nans
+from src.models.explainability import (
+    average_importance_maps,
+    compute_xgb_native_shap_importance,
+)
+from src.models.xgb_forecaster import _build_features, _fill_nans, xgb_feature_name_list
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "xgb_models"
 
@@ -131,6 +135,12 @@ class TrainedXGBModels:
     train_scores: Dict[str, Dict[int, float]] = field(default_factory=dict)
     # Ordered list of exogenous series keys used during training (for inference alignment)
     exog_keys: List[str] = field(default_factory=list)
+    # Feature column labels (same order as XGB matrix); from xgb_feature_name_list(exog_keys)
+    feature_names: List[str] = field(default_factory=list)
+    # Mean normalised gain importances across all (lookback, horizon) XGB models
+    feature_importances_mean: Dict[str, float] = field(default_factory=dict)
+    # Mean normalised mean-absolute SHAP values across fitted cells
+    shap_importances_mean: Dict[str, float] = field(default_factory=dict)
 
 
 # ── Param combo generation ────────────────────────────────────────────────────
@@ -336,6 +346,43 @@ def _grid_search_single(
     return best_params, best_score, train_score, history
 
 
+def _aggregate_xgb_importances(trained: TrainedXGBModels, exog_key_list: List[str]) -> None:
+    """
+    Average XGBoost gain importances across every fitted cell in ``final_models``
+    and L1-normalise. Helps diagnose flat forecasts (e.g. time-of-day vs lags dominating).
+    """
+    names = xgb_feature_name_list(exog_key_list)
+    trained.feature_names = names
+    n_feat = len(names)
+    acc = np.zeros(n_feat, dtype=np.float64)
+    n_models = 0
+    for lb_models in trained.final_models.values():
+        for model in lb_models.values():
+            if model is None:
+                continue
+            fi = getattr(model, "feature_importances_", None)
+            if fi is None:
+                continue
+            arr = np.asarray(fi, dtype=np.float64).ravel()
+            if arr.shape[0] != n_feat:
+                logger.warning(
+                    "XGB feature_importances_ length %d != expected %d — skipping model",
+                    arr.shape[0], n_feat,
+                )
+                continue
+            acc += arr
+            n_models += 1
+    if n_models == 0:
+        return
+    acc /= n_models
+    tot = float(acc.sum())
+    if tot > 0:
+        acc /= tot
+    trained.feature_importances_mean = {names[i]: float(acc[i]) for i in range(n_feat)}
+    top5 = sorted(trained.feature_importances_mean.items(), key=lambda x: -x[1])[:5]
+    logger.info("XGB mean feature importance (top 5): %s", top5)
+
+
 # ── Full training pipeline ────────────────────────────────────────────────────
 
 def train_xgb_models(
@@ -403,6 +450,8 @@ def train_xgb_models(
 
     result = TrainedXGBModels(target=target, training_timestamp=time.time())
     result.exog_keys = list(exog_series.keys()) if exog_series else []
+    result.feature_names = xgb_feature_name_list(result.exog_keys)
+    shap_maps: List[Dict[str, float]] = []
 
     if selected_lookback and selected_lookback in ROLLING_LOOKBACKS:
         lookbacks = [(selected_lookback, ROLLING_LOOKBACKS[selected_lookback])]
@@ -449,6 +498,9 @@ def train_xgb_models(
             final_model.fit(X, y)
             result.final_models[lb_label][h_sps] = final_model
             result.col_means[lb_label][h_sps]    = cmeans
+            shap_map = compute_xgb_native_shap_importance(final_model, X, result.feature_names)
+            if shap_map:
+                shap_maps.append(shap_map)
 
     if progress_callback:
         progress_callback(
@@ -461,6 +513,9 @@ def train_xgb_models(
     )
     result.backtest_errors     = errors
     result.backtest_crossovers = crossovers
+
+    _aggregate_xgb_importances(result, result.exog_keys)
+    result.shap_importances_mean = average_importance_maps(shap_maps)
 
     if progress_callback:
         progress_callback(1.0, f"{target_desc} training complete.")
