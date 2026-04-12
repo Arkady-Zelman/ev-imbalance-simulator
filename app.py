@@ -2,7 +2,10 @@
 Ohme Fleet Trading — Main Streamlit Frontend
 ============================================
 
-5-tab read-only UI. All model training runs offline via:
+Once UI scroll layout (Magic Portfolio design system).
+Sections: Market & Allocation | Demand Map | Summary | Sensitivity
+
+Model training runs offline via:
     python -m backend.train
     python -m backend.predict
 
@@ -34,33 +37,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
-<style>
-/* Dark background for the whole app */
-.stApp { background-color: #0E1117; }
+# ── Once UI CSS ────────────────────────────────────────────────────────────────
 
-/* Tab font */
-button[data-baseweb="tab"] { font-size: 13px; font-weight: 500; }
+from src.ui.styles import ONCE_UI_CSS
+st.markdown(ONCE_UI_CSS, unsafe_allow_html=True)
 
-/* KPI metric card */
-div[data-testid="metric-container"] {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px;
-    padding: 12px 16px;
-}
-[data-testid="metric-container"] [data-testid="stMetricValue"] { font-size: 1.6rem; }
-
-/* Chart border radius */
-.stPlotlyChart { border-radius: 8px; }
-
-/* Tighten sidebar */
-section[data-testid="stSidebar"] { width: 260px !important; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── Startup: load predictions from disk ───────────────────────────────────────
+# ── Data loading ───────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _load_parquet(path: Path):
@@ -79,7 +61,6 @@ def _load_metadata(path: Path) -> dict:
 
 
 def _init_predictions() -> None:
-    """Load parquet prediction files into session state on first run."""
     if st.session_state.get(sk.PREDICTIONS_LOADED):
         return
 
@@ -101,11 +82,10 @@ def _init_predictions() -> None:
     st.session_state[sk.PREDICTIONS_LOADED] = all_present
 
     if not all_present:
-        logger.warning("One or more prediction parquet files are missing from %s", PREDICTION_DIR)
+        logger.warning("One or more prediction parquet files missing from %s", PREDICTION_DIR)
 
 
 def _init_market_data() -> None:
-    """Fetch recent ELEXON data (last 90 days) for chart backgrounds."""
     if sk.SIP_DF in st.session_state and st.session_state[sk.SIP_DF] is not None:
         return
 
@@ -130,7 +110,6 @@ def _init_market_data() -> None:
             st.session_state[sk.DEMAND_DF] = demand_df
             st.session_state[sk.GEN_DF]    = gen_df
 
-            # Derive DA price from MIP and cache it
             da = derive_da_price_from_mip(mip_df)
             st.session_state[sk.DA_PRICE] = da if da is not None else DEFAULT_DA_PRICE
 
@@ -139,7 +118,7 @@ def _init_market_data() -> None:
             st.session_state[sk.DA_PRICE] = DEFAULT_DA_PRICE
 
 
-# ── Initialise ─────────────────────────────────────────────────────────────────
+# ── Initialise data ────────────────────────────────────────────────────────────
 
 _init_predictions()
 _init_market_data()
@@ -149,7 +128,6 @@ _init_market_data()
 col_title, col_status = st.columns([8, 2])
 with col_title:
     st.title("⚡ Ohme Fleet Trading")
-
 with col_status:
     predictions_loaded = st.session_state.get(sk.PREDICTIONS_LOADED, False)
     metadata = st.session_state.get(sk.METADATA, {})
@@ -185,7 +163,6 @@ with st.sidebar:
     _da       = st.number_input("DA price (£/MWh)", 0.0, 500.0,
                                 float(st.session_state.get(sk.DA_PRICE, DEFAULT_DA_PRICE)),
                                 1.0, key="sidebar_da_price")
-    # Keep DA_PRICE key in sync so tabs that read sk.DA_PRICE still work
     st.session_state[sk.DA_PRICE] = _da
 
     st.divider()
@@ -213,33 +190,51 @@ with st.sidebar:
                              index=0, key=sk.SIM_MC_RUNS_SENS,
                              label_visibility="collapsed")
 
-# ── Tab routing ────────────────────────────────────────────────────────────────
+# ── Scroll-spy nav ─────────────────────────────────────────────────────────────
 
-from tabs.tab_main_chart        import render as render_main_chart
+from src.ui.layout import inject_scrollnav, section_start, section_end
+
+inject_scrollnav()
+
+# ── Tab imports ────────────────────────────────────────────────────────────────
+
+from tabs.tab_main_chart          import render as render_main_chart
 from tabs.tab_capacity_allocation import render as render_allocation
-from tabs.tab_executive_summary import render as render_executive
-from tabs.tab_sensitivity       import render as render_sensitivity
-from tabs.tab_demand_map        import render as render_demand_map
+from tabs.tab_demand_map          import render as render_demand_map
+from tabs.tab_executive_summary   import render as render_executive
+from tabs.tab_sensitivity         import render as render_sensitivity
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📈  Market",
-    "⚖️  Allocation",
-    "📊  Summary",
-    "🔬  Sensitivity",
-    "🗺️  Demand Map",
-])
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 1 — Market Overview + Capacity Allocation
+# ══════════════════════════════════════════════════════════════════════════════
 
-with tab1:
-    render_main_chart()
+st.markdown(section_start("sec-market", "Market & Allocation"), unsafe_allow_html=True)
+render_main_chart()
+st.markdown("<hr style='border:none;border-top:1px solid var(--border);margin:32px 0 24px;'>",
+            unsafe_allow_html=True)
+render_allocation()
+st.markdown(section_end(), unsafe_allow_html=True)
 
-with tab2:
-    render_allocation()
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 2 — Demand Map
+# ══════════════════════════════════════════════════════════════════════════════
 
-with tab3:
-    render_executive()
+st.markdown(section_start("sec-demand", "Demand Map"), unsafe_allow_html=True)
+render_demand_map()
+st.markdown(section_end(), unsafe_allow_html=True)
 
-with tab4:
-    render_sensitivity()
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 3 — Executive Summary
+# ══════════════════════════════════════════════════════════════════════════════
 
-with tab5:
-    render_demand_map()
+st.markdown(section_start("sec-summary", "Summary"), unsafe_allow_html=True)
+render_executive()
+st.markdown(section_end(), unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section 4 — Sensitivity & Scenario Analysis
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.markdown(section_start("sec-sens", "Sensitivity"), unsafe_allow_html=True)
+render_sensitivity()
+st.markdown(section_end(), unsafe_allow_html=True)

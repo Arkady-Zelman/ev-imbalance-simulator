@@ -29,6 +29,8 @@ desktop.ini
 
 # Streamlit
 .streamlit/secrets.toml
+# Optional local classic tab entrypoint (main app is app.py)
+app_v2.py
 
 # Secrets & credentials (catch-all for future-proofing)
 .env

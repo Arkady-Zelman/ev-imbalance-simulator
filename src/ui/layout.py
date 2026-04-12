@@ -1,5 +1,5 @@
 """
-Scroll-spy navigation, starry background, and section wrappers for app_v2.py.
+Scroll-spy navigation, starry background, and section wrappers for app.py (Once UI).
 
 Uses window.parent.document body-append pattern so that position:fixed elements
 are anchored to the real viewport — bypassing Streamlit's container hierarchy.

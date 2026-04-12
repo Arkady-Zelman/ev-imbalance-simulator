@@ -1,8 +1,6 @@
 """
 Once UI Magic Portfolio design tokens applied to Streamlit.
-Inject ONCE_UI_CSS once at the top of app_v2.py.
-
-Revert: switch back to `streamlit run app.py` — this file is only used by app_v2.py.
+Inject ONCE_UI_CSS once at the top of app.py.
 """
 from __future__ import annotations
 
@@ -224,7 +222,7 @@ div[data-testid="metric-container"]:hover {
 </style>
 """
 
-# Shared base for all Plotly figures in app_v2.py — transparent backgrounds so
+# Shared base for all Plotly figures in app.py — transparent backgrounds so
 # the starfield background shows through and the aero glass CSS can work.
 PLOTLY_LAYOUT_BASE: dict = dict(
     template="plotly_dark",
