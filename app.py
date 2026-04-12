@@ -1,5 +1,5 @@
 """
-Ohme Fleet Trading — Main Streamlit Frontend
+EV Flex Trading — Main Streamlit Frontend
 ============================================
 
 Once UI scroll layout (Magic Portfolio design system).
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ── Page config ────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Ohme Fleet Trading",
+    page_title="EV Flex Trading",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -140,7 +140,7 @@ _init_market_data()
 
 col_title, col_status = st.columns([8, 2])
 with col_title:
-    st.title("⚡ Ohme Fleet Trading")
+    st.title("⚡ EV Flex Trading")
 with col_status:
     predictions_loaded = st.session_state.get(sk.PREDICTIONS_LOADED, False)
     metadata = st.session_state.get(sk.METADATA, {})

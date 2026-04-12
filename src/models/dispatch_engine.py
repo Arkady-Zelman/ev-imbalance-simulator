@@ -1,5 +1,5 @@
 """
-Dispatch Decision Engine for Ohme EV Fleet.
+Dispatch Decision Engine for the EV fleet.
 
 Combines forecasts of:
   - GB system supply (generation by fuel type: wind, thermal, interconnectors, storage)

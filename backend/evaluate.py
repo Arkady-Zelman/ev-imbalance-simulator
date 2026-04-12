@@ -31,7 +31,7 @@ if str(_ROOT) not in sys.path:
 from src.config import FORECAST_TARGETS, MODEL_DIR, PREDICTION_DIR
 
 st.set_page_config(
-    page_title="Ohme — Model Diagnostics",
+    page_title="EV Flex Trading — Model Diagnostics",
     page_icon="🔬",
     layout="wide",
 )
@@ -265,7 +265,7 @@ def _render_alpha_crossover(artifact: dict, target: str) -> None:
 # ── App layout ────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    st.title("Ohme Fleet Trading — Model Diagnostics")
+    st.title("EV Flex Trading — Model Diagnostics")
 
     metadata = _load_metadata()
     fan_df   = _load_parquet(PREDICTION_DIR / "backtest_fan.parquet")

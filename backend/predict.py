@@ -439,7 +439,7 @@ def generate_retrospective_fan_data(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    logger.info("=== Ohme Fleet Trading — Prediction Pipeline ===")
+    logger.info("=== EV Flex Trading — Prediction Pipeline ===")
 
     # Load artifacts
     artifacts: Dict[str, dict] = {}

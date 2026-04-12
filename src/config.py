@@ -28,7 +28,7 @@ FORECAST_TARGETS = ["sip", "mip", "demand", "total_generation"]
 # Fleet & hardware
 # ---------------------------------------------------------------------------
 DEFAULT_FLEET_SIZE = 20_000
-CHARGER_CAPACITY_KW = 7.4  # Ohme Home Pro standard
+CHARGER_CAPACITY_KW = 7.4  # typical single-phase home charger
 MIN_FLEET_SIZE = 5_000
 MAX_FLEET_SIZE = 100_000
 

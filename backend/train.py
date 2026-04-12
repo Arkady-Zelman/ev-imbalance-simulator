@@ -496,7 +496,7 @@ def save_artifact(artifact: dict) -> Path:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    logger.info("=== Ohme Fleet Trading — Backend Training Pipeline ===")
+    logger.info("=== EV Flex Trading — Backend Training Pipeline ===")
     logger.info("Targets: %s", FORECAST_TARGETS)
 
     data = fetch_all_data()
