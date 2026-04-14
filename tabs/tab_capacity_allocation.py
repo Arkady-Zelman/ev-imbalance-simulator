@@ -31,6 +31,7 @@ from src.config import (
     SP_LABELS,
 )
 from src.predictions import PredictionSchemaError, load_intraday_predictions
+from src.ui.dataframes import with_optional_background_gradient
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +290,11 @@ def render() -> None:
 
     df_table = pd.DataFrame(table_rows)
     st.dataframe(
-        df_table.style.background_gradient(subset=["Wholesale MW", "Balancing MW"], cmap="Blues"),
+        with_optional_background_gradient(
+            df_table,
+            subset=["Wholesale MW", "Balancing MW"],
+            cmap="Blues",
+        ),
         width="stretch",
         height=380,
     )

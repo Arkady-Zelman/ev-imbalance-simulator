@@ -29,6 +29,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.config import FORECAST_TARGETS, MODEL_DIR, PREDICTION_DIR
+from src.ui.dataframes import with_optional_background_gradient
 
 st.set_page_config(
     page_title="EV Flex Trading — Model Diagnostics",
@@ -200,7 +201,10 @@ def _render_overfitting_gap(artifact: dict, target: str) -> None:
         return
 
     df = pd.DataFrame(rows)
-    st.dataframe(df.style.background_gradient(subset=["Gap"], cmap="RdYlGn_r"), width="stretch")
+    st.dataframe(
+        with_optional_background_gradient(df, subset=["Gap"], cmap="RdYlGn_r"),
+        width="stretch",
+    )
 
 
 def _render_weights(metadata: dict) -> None:
