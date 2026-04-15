@@ -20,16 +20,36 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn as nn
+
+try:
+    import torch
+    import torch.nn as nn
+    _HAS_TORCH = True
+    _TORCH_IMPORT_ERROR = None
+except ImportError as exc:
+    _HAS_TORCH = False
+    _TORCH_IMPORT_ERROR = exc
+    torch = None  # type: ignore[assignment]
+    nn = None     # type: ignore[assignment]
 
 _HERE = Path(__file__).resolve().parent
 
 
 # ── Model definition (must match what was trained) ───────────────────────────
 
-class LSTM(nn.Module):
+def _require_torch() -> None:
+    if _HAS_TORCH:
+        return
+    raise ImportError(
+        "PyTorch (`torch`) is required to load the saved LSTM MIP model. "
+        "Install the repo dependencies with `python -m pip install -r requirements.txt`, "
+        "or switch this notebook/kernel to the interpreter that already has `torch` installed."
+    ) from _TORCH_IMPORT_ERROR
+
+
+class LSTM(nn.Module if _HAS_TORCH else object):  # type: ignore[misc]
     def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 2):
+        _require_torch()
         super().__init__()
         self.lstm   = nn.LSTM(input_size, hidden_size, num_layers,
                                batch_first=True, dropout=0.2)
@@ -57,6 +77,7 @@ def load_artifacts(
     meta : dict
         Keys: scaler, target_col, feature_cols, input_size, lookback
     """
+    _require_torch()
     with open(scaler_path, "rb") as f:
         meta = pickle.load(f)
 
@@ -98,6 +119,7 @@ def predict(
     pd.Series
         Forecast MIP values (GBP/MWh) with a 30-min DatetimeIndex.
     """
+    _require_torch()
     scaler     = meta["scaler"]
     target_col = meta["target_col"]
     lookback   = meta["lookback"]
