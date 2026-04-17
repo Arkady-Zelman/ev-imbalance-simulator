@@ -1,200 +1,200 @@
 {
-  "generated_at": "2026-04-17T13:32:12.263985+00:00",
+  "generated_at": "2026-04-17T13:55:03.374821+00:00",
   "horizon_periods": 48,
   "freq": "30min",
   "unit": "GBP/MWh",
   "forecast": [
     {
-      "datetime": "2026-04-17T13:30:00",
-      "mip_gbp_mwh": 29.9909
-    },
-    {
       "datetime": "2026-04-17T14:00:00",
-      "mip_gbp_mwh": 31.5693
+      "mip_gbp_mwh": 35.5059
     },
     {
       "datetime": "2026-04-17T14:30:00",
-      "mip_gbp_mwh": 33.2266
+      "mip_gbp_mwh": 38.9556
     },
     {
       "datetime": "2026-04-17T15:00:00",
-      "mip_gbp_mwh": 36.8287
+      "mip_gbp_mwh": 45.4146
     },
     {
       "datetime": "2026-04-17T15:30:00",
-      "mip_gbp_mwh": 41.4135
+      "mip_gbp_mwh": 52.9804
     },
     {
       "datetime": "2026-04-17T16:00:00",
-      "mip_gbp_mwh": 46.8783
+      "mip_gbp_mwh": 61.1085
     },
     {
       "datetime": "2026-04-17T16:30:00",
-      "mip_gbp_mwh": 52.4361
+      "mip_gbp_mwh": 68.9699
     },
     {
       "datetime": "2026-04-17T17:00:00",
-      "mip_gbp_mwh": 58.0275
+      "mip_gbp_mwh": 76.4854
     },
     {
       "datetime": "2026-04-17T17:30:00",
-      "mip_gbp_mwh": 62.556
+      "mip_gbp_mwh": 82.5447
     },
     {
       "datetime": "2026-04-17T18:00:00",
-      "mip_gbp_mwh": 65.4239
+      "mip_gbp_mwh": 86.4477
     },
     {
       "datetime": "2026-04-17T18:30:00",
-      "mip_gbp_mwh": 69.2171
+      "mip_gbp_mwh": 90.8186
     },
     {
       "datetime": "2026-04-17T19:00:00",
-      "mip_gbp_mwh": 72.3344
+      "mip_gbp_mwh": 94.4396
     },
     {
       "datetime": "2026-04-17T19:30:00",
-      "mip_gbp_mwh": 74.4143
+      "mip_gbp_mwh": 96.7944
     },
     {
       "datetime": "2026-04-17T20:00:00",
-      "mip_gbp_mwh": 75.1899
+      "mip_gbp_mwh": 97.623
     },
     {
       "datetime": "2026-04-17T20:30:00",
-      "mip_gbp_mwh": 74.702
+      "mip_gbp_mwh": 97.0378
     },
     {
       "datetime": "2026-04-17T21:00:00",
-      "mip_gbp_mwh": 73.4254
+      "mip_gbp_mwh": 95.5699
     },
     {
       "datetime": "2026-04-17T21:30:00",
-      "mip_gbp_mwh": 71.7802
+      "mip_gbp_mwh": 93.7022
     },
     {
       "datetime": "2026-04-17T22:00:00",
-      "mip_gbp_mwh": 69.6977
+      "mip_gbp_mwh": 91.4291
     },
     {
       "datetime": "2026-04-17T22:30:00",
-      "mip_gbp_mwh": 65.5312
+      "mip_gbp_mwh": 87.0858
     },
     {
       "datetime": "2026-04-17T23:00:00",
-      "mip_gbp_mwh": 61.8096
+      "mip_gbp_mwh": 83.0487
     },
     {
       "datetime": "2026-04-17T23:30:00",
-      "mip_gbp_mwh": 59.7691
+      "mip_gbp_mwh": 80.9178
     },
     {
       "datetime": "2026-04-18T00:00:00",
-      "mip_gbp_mwh": 58.1113
+      "mip_gbp_mwh": 79.4973
     },
     {
       "datetime": "2026-04-18T00:30:00",
-      "mip_gbp_mwh": 57.9077
+      "mip_gbp_mwh": 79.9843
     },
     {
       "datetime": "2026-04-18T01:00:00",
-      "mip_gbp_mwh": 57.6577
+      "mip_gbp_mwh": 80.6642
     },
     {
       "datetime": "2026-04-18T01:30:00",
-      "mip_gbp_mwh": 57.8881
+      "mip_gbp_mwh": 81.6291
     },
     {
       "datetime": "2026-04-18T02:00:00",
-      "mip_gbp_mwh": 58.2203
+      "mip_gbp_mwh": 82.6536
     },
     {
       "datetime": "2026-04-18T02:30:00",
-      "mip_gbp_mwh": 58.8712
+      "mip_gbp_mwh": 83.8977
     },
     {
       "datetime": "2026-04-18T03:00:00",
-      "mip_gbp_mwh": 59.6259
+      "mip_gbp_mwh": 85.1476
     },
     {
       "datetime": "2026-04-18T03:30:00",
-      "mip_gbp_mwh": 59.9906
+      "mip_gbp_mwh": 85.9121
     },
     {
       "datetime": "2026-04-18T04:00:00",
-      "mip_gbp_mwh": 61.015
+      "mip_gbp_mwh": 87.2393
     },
     {
       "datetime": "2026-04-18T04:30:00",
-      "mip_gbp_mwh": 62.3352
+      "mip_gbp_mwh": 88.8663
     },
     {
       "datetime": "2026-04-18T05:00:00",
-      "mip_gbp_mwh": 64.2281
+      "mip_gbp_mwh": 91.01
     },
     {
       "datetime": "2026-04-18T05:30:00",
-      "mip_gbp_mwh": 67.1787
+      "mip_gbp_mwh": 94.1582
     },
     {
       "datetime": "2026-04-18T06:00:00",
-      "mip_gbp_mwh": 70.6637
+      "mip_gbp_mwh": 97.8213
     },
     {
       "datetime": "2026-04-18T06:30:00",
-      "mip_gbp_mwh": 73.7057
+      "mip_gbp_mwh": 100.9223
     },
     {
       "datetime": "2026-04-18T07:00:00",
-      "mip_gbp_mwh": 76.4206
+      "mip_gbp_mwh": 103.4966
     },
     {
       "datetime": "2026-04-18T07:30:00",
-      "mip_gbp_mwh": 78.5827
+      "mip_gbp_mwh": 105.3615
     },
     {
       "datetime": "2026-04-18T08:00:00",
-      "mip_gbp_mwh": 79.3756
+      "mip_gbp_mwh": 105.7356
     },
     {
       "datetime": "2026-04-18T08:30:00",
-      "mip_gbp_mwh": 79.4629
+      "mip_gbp_mwh": 105.2905
     },
     {
       "datetime": "2026-04-18T09:00:00",
-      "mip_gbp_mwh": 78.2823
+      "mip_gbp_mwh": 103.5771
     },
     {
       "datetime": "2026-04-18T09:30:00",
-      "mip_gbp_mwh": 76.5786
+      "mip_gbp_mwh": 101.317
     },
     {
       "datetime": "2026-04-18T10:00:00",
-      "mip_gbp_mwh": 73.8331
+      "mip_gbp_mwh": 98.0693
     },
     {
       "datetime": "2026-04-18T10:30:00",
-      "mip_gbp_mwh": 70.436
+      "mip_gbp_mwh": 94.1693
     },
     {
       "datetime": "2026-04-18T11:00:00",
-      "mip_gbp_mwh": 67.1834
+      "mip_gbp_mwh": 90.4247
     },
     {
       "datetime": "2026-04-18T11:30:00",
-      "mip_gbp_mwh": 64.106
+      "mip_gbp_mwh": 86.9033
     },
     {
       "datetime": "2026-04-18T12:00:00",
-      "mip_gbp_mwh": 61.7624
+      "mip_gbp_mwh": 84.123
     },
     {
       "datetime": "2026-04-18T12:30:00",
-      "mip_gbp_mwh": 59.0532
+      "mip_gbp_mwh": 81.0373
     },
     {
       "datetime": "2026-04-18T13:00:00",
-      "mip_gbp_mwh": 57.2192
+      "mip_gbp_mwh": 78.7698
+    },
+    {
+      "datetime": "2026-04-18T13:30:00",
+      "mip_gbp_mwh": 76.2585
     }
   ]
 }
