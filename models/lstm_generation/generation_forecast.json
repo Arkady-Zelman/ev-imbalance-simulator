@@ -1,200 +1,200 @@
 {
-  "generated_at": "2026-04-17T09:34:50.377016+00:00",
+  "generated_at": "2026-04-17T12:05:40.993364+00:00",
   "horizon_periods": 48,
   "freq": "30min",
   "unit": "MW",
   "forecast": [
     {
-      "datetime": "2026-04-14T15:30:00",
-      "total_generation_mw": 27970.1211
+      "datetime": "2026-04-17T12:00:00",
+      "total_generation_mw": 27472.4531
     },
     {
-      "datetime": "2026-04-14T16:00:00",
-      "total_generation_mw": 28311.9766
+      "datetime": "2026-04-17T12:30:00",
+      "total_generation_mw": 27671.5215
     },
     {
-      "datetime": "2026-04-14T16:30:00",
-      "total_generation_mw": 29089.3789
+      "datetime": "2026-04-17T13:00:00",
+      "total_generation_mw": 28106.082
     },
     {
-      "datetime": "2026-04-14T17:00:00",
-      "total_generation_mw": 30763.2637
+      "datetime": "2026-04-17T13:30:00",
+      "total_generation_mw": 28192.7285
     },
     {
-      "datetime": "2026-04-14T17:30:00",
-      "total_generation_mw": 32129.957
+      "datetime": "2026-04-17T14:00:00",
+      "total_generation_mw": 27733.666
     },
     {
-      "datetime": "2026-04-14T18:00:00",
-      "total_generation_mw": 32989.7617
+      "datetime": "2026-04-17T14:30:00",
+      "total_generation_mw": 27065.7949
     },
     {
-      "datetime": "2026-04-14T18:30:00",
-      "total_generation_mw": 33588.9219
+      "datetime": "2026-04-17T15:00:00",
+      "total_generation_mw": 27448.5566
     },
     {
-      "datetime": "2026-04-14T19:00:00",
-      "total_generation_mw": 33785.3477
+      "datetime": "2026-04-17T15:30:00",
+      "total_generation_mw": 28665.1855
     },
     {
-      "datetime": "2026-04-14T19:30:00",
-      "total_generation_mw": 33395.332
+      "datetime": "2026-04-17T16:00:00",
+      "total_generation_mw": 30105.5293
     },
     {
-      "datetime": "2026-04-14T20:00:00",
-      "total_generation_mw": 32711.0273
+      "datetime": "2026-04-17T16:30:00",
+      "total_generation_mw": 31432.1602
     },
     {
-      "datetime": "2026-04-14T20:30:00",
-      "total_generation_mw": 31736.6367
+      "datetime": "2026-04-17T17:00:00",
+      "total_generation_mw": 32526.2344
     },
     {
-      "datetime": "2026-04-14T21:00:00",
-      "total_generation_mw": 30659.168
+      "datetime": "2026-04-17T17:30:00",
+      "total_generation_mw": 33106.7812
     },
     {
-      "datetime": "2026-04-14T21:30:00",
-      "total_generation_mw": 29304.5449
+      "datetime": "2026-04-17T18:00:00",
+      "total_generation_mw": 33057.8984
     },
     {
-      "datetime": "2026-04-14T22:00:00",
-      "total_generation_mw": 27673.4629
+      "datetime": "2026-04-17T18:30:00",
+      "total_generation_mw": 33424.6094
     },
     {
-      "datetime": "2026-04-14T22:30:00",
-      "total_generation_mw": 25948.6035
+      "datetime": "2026-04-17T19:00:00",
+      "total_generation_mw": 33838.2852
     },
     {
-      "datetime": "2026-04-14T23:00:00",
-      "total_generation_mw": 24549.3672
+      "datetime": "2026-04-17T19:30:00",
+      "total_generation_mw": 33777.832
     },
     {
-      "datetime": "2026-04-14T23:30:00",
-      "total_generation_mw": 23478.3145
+      "datetime": "2026-04-17T20:00:00",
+      "total_generation_mw": 33181.1328
     },
     {
-      "datetime": "2026-04-15T00:00:00",
-      "total_generation_mw": 22508.8379
+      "datetime": "2026-04-17T20:30:00",
+      "total_generation_mw": 32192.9863
     },
     {
-      "datetime": "2026-04-15T00:30:00",
-      "total_generation_mw": 21955.8301
+      "datetime": "2026-04-17T21:00:00",
+      "total_generation_mw": 30979.8613
     },
     {
-      "datetime": "2026-04-15T01:00:00",
-      "total_generation_mw": 21604.7754
+      "datetime": "2026-04-17T21:30:00",
+      "total_generation_mw": 29689.873
     },
     {
-      "datetime": "2026-04-15T01:30:00",
-      "total_generation_mw": 21120.7402
+      "datetime": "2026-04-17T22:00:00",
+      "total_generation_mw": 28317.9512
     },
     {
-      "datetime": "2026-04-15T02:00:00",
-      "total_generation_mw": 20629.0156
+      "datetime": "2026-04-17T22:30:00",
+      "total_generation_mw": 26480.4844
     },
     {
-      "datetime": "2026-04-15T02:30:00",
-      "total_generation_mw": 20178.3594
+      "datetime": "2026-04-17T23:00:00",
+      "total_generation_mw": 24851.6309
     },
     {
-      "datetime": "2026-04-15T03:00:00",
-      "total_generation_mw": 19783.7832
+      "datetime": "2026-04-17T23:30:00",
+      "total_generation_mw": 23910.8652
     },
     {
-      "datetime": "2026-04-15T03:30:00",
-      "total_generation_mw": 19553.3555
+      "datetime": "2026-04-18T00:00:00",
+      "total_generation_mw": 23327.2852
     },
     {
-      "datetime": "2026-04-15T04:00:00",
-      "total_generation_mw": 19589.1543
+      "datetime": "2026-04-18T00:30:00",
+      "total_generation_mw": 22930.373
     },
     {
-      "datetime": "2026-04-15T04:30:00",
-      "total_generation_mw": 19962.1562
+      "datetime": "2026-04-18T01:00:00",
+      "total_generation_mw": 22630.6484
     },
     {
-      "datetime": "2026-04-15T05:00:00",
-      "total_generation_mw": 20597.3008
+      "datetime": "2026-04-18T01:30:00",
+      "total_generation_mw": 22414.2949
     },
     {
-      "datetime": "2026-04-15T05:30:00",
-      "total_generation_mw": 21437.3887
+      "datetime": "2026-04-18T02:00:00",
+      "total_generation_mw": 22178.4668
     },
     {
-      "datetime": "2026-04-15T06:00:00",
-      "total_generation_mw": 22975.0098
+      "datetime": "2026-04-18T02:30:00",
+      "total_generation_mw": 21934.6094
     },
     {
-      "datetime": "2026-04-15T06:30:00",
-      "total_generation_mw": 25036.2969
+      "datetime": "2026-04-18T03:00:00",
+      "total_generation_mw": 21688.0059
     },
     {
-      "datetime": "2026-04-15T07:00:00",
-      "total_generation_mw": 26588.8984
+      "datetime": "2026-04-18T03:30:00",
+      "total_generation_mw": 21417.1973
     },
     {
-      "datetime": "2026-04-15T07:30:00",
-      "total_generation_mw": 27605.2109
+      "datetime": "2026-04-18T04:00:00",
+      "total_generation_mw": 21351.0566
     },
     {
-      "datetime": "2026-04-15T08:00:00",
-      "total_generation_mw": 28296.3301
+      "datetime": "2026-04-18T04:30:00",
+      "total_generation_mw": 21544.1328
     },
     {
-      "datetime": "2026-04-15T08:30:00",
-      "total_generation_mw": 28766.4492
+      "datetime": "2026-04-18T05:00:00",
+      "total_generation_mw": 22024.9844
     },
     {
-      "datetime": "2026-04-15T09:00:00",
-      "total_generation_mw": 28706.209
+      "datetime": "2026-04-18T05:30:00",
+      "total_generation_mw": 23016.5684
     },
     {
-      "datetime": "2026-04-15T09:30:00",
-      "total_generation_mw": 27923.1973
+      "datetime": "2026-04-18T06:00:00",
+      "total_generation_mw": 24397.0742
     },
     {
-      "datetime": "2026-04-15T10:00:00",
-      "total_generation_mw": 27267.1426
+      "datetime": "2026-04-18T06:30:00",
+      "total_generation_mw": 25632.3574
     },
     {
-      "datetime": "2026-04-15T10:30:00",
-      "total_generation_mw": 26870.168
+      "datetime": "2026-04-18T07:00:00",
+      "total_generation_mw": 26682.1719
     },
     {
-      "datetime": "2026-04-15T11:00:00",
-      "total_generation_mw": 26539.5039
+      "datetime": "2026-04-18T07:30:00",
+      "total_generation_mw": 27528.1777
     },
     {
-      "datetime": "2026-04-15T11:30:00",
-      "total_generation_mw": 26474.4805
+      "datetime": "2026-04-18T08:00:00",
+      "total_generation_mw": 28002.0098
     },
     {
-      "datetime": "2026-04-15T12:00:00",
-      "total_generation_mw": 26468.3945
+      "datetime": "2026-04-18T08:30:00",
+      "total_generation_mw": 28274.2285
     },
     {
-      "datetime": "2026-04-15T12:30:00",
-      "total_generation_mw": 26365.1934
+      "datetime": "2026-04-18T09:00:00",
+      "total_generation_mw": 28357.5762
     },
     {
-      "datetime": "2026-04-15T13:00:00",
-      "total_generation_mw": 26331.0996
+      "datetime": "2026-04-18T09:30:00",
+      "total_generation_mw": 28416.3184
     },
     {
-      "datetime": "2026-04-15T13:30:00",
-      "total_generation_mw": 26391.748
+      "datetime": "2026-04-18T10:00:00",
+      "total_generation_mw": 28334.7598
     },
     {
-      "datetime": "2026-04-15T14:00:00",
-      "total_generation_mw": 26588.2344
+      "datetime": "2026-04-18T10:30:00",
+      "total_generation_mw": 28127.4941
     },
     {
-      "datetime": "2026-04-15T14:30:00",
-      "total_generation_mw": 27087.6621
+      "datetime": "2026-04-18T11:00:00",
+      "total_generation_mw": 28042.2598
     },
     {
-      "datetime": "2026-04-15T15:00:00",
-      "total_generation_mw": 27912.1602
+      "datetime": "2026-04-18T11:30:00",
+      "total_generation_mw": 28068.9062
     }
   ]
 }
